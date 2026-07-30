@@ -1,0 +1,245 @@
+# ==============================================
+# Hybrid Signal Bot - چند ارزی + کم‌مصرف
+# ==============================================
+# نصب:
+# pip install ccxt pandas pandas-ta openai requests
+
+import time
+import logging
+import requests
+from datetime import datetime
+from typing import Dict, Optional, List
+import pandas as pd
+import ccxt
+from openai import OpenAI
+
+# ==================== تنظیمات ====================
+class Config:
+    # ---------- صرافی ----------
+    EXCHANGE_ID = "binance"
+    API_KEY = ""                  # فعلاً خالی بذار (داده عمومی کافیه)
+    SECRET = ""
+    PASSWORD = ""
+
+    # ---------- هوش مصنوعی (xAI / Grok) ----------
+    AI_API_KEY = "YOUR_XAI_API_KEY"          # ← فقط این را پر کن
+    AI_BASE_URL = "https://api.x.ai/v1"      # برای Grok
+    AI_MODEL = "grok-3"                      # یا grok-3-mini اگر موجود بود
+
+    # ---------- تلگرام ----------
+    TELEGRAM_BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"   # ← پر کن
+    TELEGRAM_CHAT_ID = "YOUR_CHAT_ID"                # ← پر کن
+
+    # ---------- ارزها (هر چی خواستی اضافه کن) ----------
+    SYMBOLS = [
+        "BTC/USDT",
+        "ETH/USDT",
+        "SOL/USDT",
+        "BNB/USDT",
+        "XRP/USDT",
+        # "DOGE/USDT",
+        # "ADA/USDT",
+    ]
+
+    TIMEFRAME = "15m"
+    CHECK_INTERVAL = 300          # هر ۵ دقیقه یک‌بار (توصیه می‌شود)
+
+    # مدیریت ریسک سیگنال
+    MIN_CONFIDENCE_AI = 0.65
+
+# ==================== لاگ ====================
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s | %(levelname)s | %(message)s',
+    handlers=[
+        logging.FileHandler("trading_signals.log", encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# ==================== لایه داده ====================
+class DataLayer:
+    def __init__(self, config: Config):
+        self.config = config
+        exchange_class = getattr(ccxt, config.EXCHANGE_ID)
+        self.exchange = exchange_class({
+            'apiKey': config.API_KEY,
+            'secret': config.SECRET,
+            'enableRateLimit': True,
+            'options': {'defaultType': 'spot'}
+        })
+
+    def fetch_ohlcv(self, symbol: str, limit: int = 100) -> pd.DataFrame:
+        ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe=self.config.TIMEFRAME, limit=limit)
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        return df
+
+# ==================== لایه تحلیل ====================
+class AnalysisLayer:
+    def __init__(self, config: Config):
+        self.config = config
+        self.client = OpenAI(
+            api_key=config.AI_API_KEY,
+            base_url=config.AI_BASE_URL
+        )
+
+    def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        import pandas_ta as ta
+        df = df.copy()
+        df['rsi'] = ta.rsi(df['close'], length=14)
+        df['ema_fast'] = ta.ema(df['close'], length=20)
+        df['ema_slow'] = ta.ema(df['close'], length=50)
+        df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
+        return df
+
+    def get_ai_confirmation(self, symbol: str, side: str, latest: pd.Series) -> Dict:
+        """فقط وقتی قوانین سیگنال دادن صدا زده می‌شود"""
+        prompt = f"""
+تو یک تحلیل‌گر کوتاه‌مدت بازار کریپتو هستی.
+سیگنال قوانین تکنیکال: {side}
+ارز: {symbol}
+قیمت فعلی: {latest['close']}
+RSI: {latest['rsi']:.2f}
+EMA20: {latest['ema_fast']:.2f}
+EMA50: {latest['ema_slow']:.2f}
+
+فقط یکی از این دو جواب را بده:
+CONFIRM
+REJECT
+
+قوانین:
+- اگر با سیگنال موافقی CONFIRM بگو
+- اگر مخالفی یا مطمئن نیستی REJECT بگو
+- هیچ متن دیگری ننویس
+"""
+        try:
+            response = self.client.chat.completions.create(
+                model=self.config.AI_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.1,
+                max_tokens=8
+            )
+            answer = response.choices[0].message.content.strip().upper()
+            confirmed = "CONFIRM" in answer
+            return {
+                "confirmed": confirmed,
+                "confidence": 0.78 if confirmed else 0.3,
+                "raw": answer
+            }
+        except Exception as e:
+            logger.error(f"خطای AI برای {symbol}: {e}")
+            return {"confirmed": False, "confidence": 0.0, "raw": "ERROR"}
+
+# ==================== موتور سیگنال ====================
+class SignalEngine:
+    def __init__(self, config: Config):
+        self.config = config
+
+    def get_rule_signal(self, df: pd.DataFrame) -> Optional[str]:
+        latest = df.iloc[-1]
+        if pd.isna(latest['rsi']) or pd.isna(latest['ema_fast']):
+            return None
+
+        if latest['ema_fast'] > latest['ema_slow'] and latest['rsi'] < 35:
+            return "BUY"
+        if latest['ema_fast'] < latest['ema_slow'] and latest['rsi'] > 65:
+            return "SELL"
+        return None
+
+# ==================== ارسال تلگرام ====================
+class TelegramSender:
+    def __init__(self, config: Config):
+        self.config = config
+        self.base_url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}"
+
+    def send_signal(self, symbol: str, side: str, latest: pd.Series, confidence: float):
+        side_fa = "خرید" if side == "BUY" else "فروش"
+        message = f"""
+🔔 **سیگنال جدید**
+
+[{symbol}]
+الان: **{side_fa}**
+
+قیمت: `{latest['close']}`
+RSI: `{latest['rsi']:.2f}`
+اطمینان: `{confidence:.0%}`
+
+⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}
+"""
+        try:
+            response = requests.post(
+                f"{self.base_url}/sendMessage",
+                json={
+                    "chat_id": self.config.TELEGRAM_CHAT_ID,
+                    "text": message,
+                    "parse_mode": "Markdown"
+                },
+                timeout=10
+            )
+            if response.status_code == 200:
+                logger.info(f"سیگنال {side} برای {symbol} ارسال شد")
+            else:
+                logger.error(f"خطای تلگرام: {response.text}")
+        except Exception as e:
+            logger.error(f"خطای ارسال تلگرام: {e}")
+
+# ==================== سیستم اصلی ====================
+class HybridTradingSystem:
+    def __init__(self):
+        self.config = Config()
+        self.data = DataLayer(self.config)
+        self.analysis = AnalysisLayer(self.config)
+        self.signal_engine = SignalEngine(self.config)
+        self.telegram = TelegramSender(self.config)
+        self.running = True
+
+    def process_symbol(self, symbol: str):
+        try:
+            df = self.data.fetch_ohlcv(symbol)
+            df = self.analysis.calculate_indicators(df)
+
+            rule_signal = self.signal_engine.get_rule_signal(df)
+            if not rule_signal:
+                return  # هیچ سیگنال قانونی نبود → هوش مصنوعی صدا زده نمی‌شود
+
+            latest = df.iloc[-1]
+            logger.info(f"{symbol} | قانون گفت: {rule_signal} → در حال تأیید با AI...")
+
+            ai_result = self.analysis.get_ai_confirmation(symbol, rule_signal, latest)
+
+            if ai_result["confirmed"] and ai_result["confidence"] >= self.config.MIN_CONFIDENCE_AI:
+                self.telegram.send_signal(symbol, rule_signal, latest, ai_result["confidence"])
+            else:
+                logger.info(f"{symbol} | AI رد کرد یا اطمینان کم بود")
+
+        except Exception as e:
+            logger.error(f"خطا در پردازش {symbol}: {e}")
+
+    def run_once(self):
+        logger.info("----- شروع بررسی همه ارزها -----")
+        for symbol in self.config.SYMBOLS:
+            self.process_symbol(symbol)
+            time.sleep(1.5)  # کمی فاصله بین ارزها برای رعایت ریت‌لیمیت
+
+    def start(self):
+        logger.info("بات سیگنال چند ارزی شروع شد")
+        logger.info(f"ارزها: {', '.join(self.config.SYMBOLS)}")
+        logger.info(f"فاصله بررسی: هر {self.config.CHECK_INTERVAL} ثانیه")
+
+        while self.running:
+            self.run_once()
+            time.sleep(self.config.CHECK_INTERVAL)
+
+    def stop(self):
+        self.running = False
+        logger.info("بات متوقف شد")
+
+# ==================== اجرا ====================
+if __name__ == "__main__":
+    bot = HybridTradingSystem()
+    try:
+        bot.start()
+    except KeyboardInterrupt:
+        bot.stop()
