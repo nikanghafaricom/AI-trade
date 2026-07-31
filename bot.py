@@ -42,12 +42,6 @@ class Config:
         "SOL/USDT",
         "BNB/USDT",
         "XRP/USDT",
-        "AVAX/USDT",
-        "LINK/USDT",
-        "NEAR/USDT",
-        "SUI/USDT",
-        "ADA/USDT",
-        "DOT/USDT",
     ]
 
     TIMEFRAME = "15m"
