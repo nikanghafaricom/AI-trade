@@ -1,8 +1,6 @@
 # ==============================================
-# Hybrid Signal Bot - نسخه امن (بدون کلید داخل کد)
+# Hybrid Signal Bot - نسخه بسیار سبک (Ultra-Light Memory)
 # ==============================================
-# نصب کتابخانه‌ها:
-# pip install ccxt pandas pandas-ta openai requests python-dotenv
 
 import os
 import time
@@ -26,10 +24,10 @@ class Config:
     SECRET = os.getenv("EXCHANGE_SECRET", "")
     PASSWORD = os.getenv("EXCHANGE_PASSWORD", "")
 
-    # ---------- هوش مصنوعی (xAI / Grok) ----------
-    AI_API_KEY = os.getenv("AI_API_KEY")
-    AI_BASE_URL = os.getenv("AI_BASE_URL", "https://api.x.ai/v1")
-    AI_MODEL = os.getenv("AI_MODEL", "grok-3")
+    # ---------- هوش مصنوعی (xAI / Grok / Groq) ----------
+    AI_API_KEY = os.getenv("GROQ_API_KEY") or os.getenv("AI_API_KEY")
+    AI_BASE_URL = os.getenv("AI_BASE_URL", "https://api.groq.com/openai/v1")
+    AI_MODEL = os.getenv("AI_MODEL", "llama-3.3-70b-versatile")
 
     # ---------- تلگرام ----------
     TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -89,6 +87,27 @@ class DataLayer:
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         return df
 
+# ==================== توابع محاسباتی سبک (جایگزین pandas-ta) ====================
+def calc_rsi(series: pd.Series, length: int = 14) -> pd.Series:
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).ewm(alpha=1/length, adjust=False).mean()
+    loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/length, adjust=False).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
+
+def calc_ema(series: pd.Series, length: int) -> pd.Series:
+    return series.ewm(span=length, adjust=False).mean()
+
+def calc_atr(df: pd.DataFrame, length: int = 14) -> pd.Series:
+    high = df['high']
+    low = df['low']
+    close = df['close']
+    tr1 = high - low
+    tr2 = (high - close.shift(1)).abs()
+    tr3 = (low - close.shift(1)).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    return tr.ewm(alpha=1/length, adjust=False).mean()
+
 # ==================== لایه تحلیل ====================
 class AnalysisLayer:
     def __init__(self, config: Config):
@@ -99,12 +118,11 @@ class AnalysisLayer:
         )
 
     def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-        import pandas_ta as ta
         df = df.copy()
-        df['rsi'] = ta.rsi(df['close'], length=14)
-        df['ema_fast'] = ta.ema(df['close'], length=20)
-        df['ema_slow'] = ta.ema(df['close'], length=50)
-        df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
+        df['rsi'] = calc_rsi(df['close'], length=14)
+        df['ema_fast'] = calc_ema(df['close'], length=20)
+        df['ema_slow'] = calc_ema(df['close'], length=50)
+        df['atr'] = calc_atr(df, length=14)
         return df
 
     def get_ai_confirmation(self, symbol: str, side: str, latest: pd.Series) -> Dict:
