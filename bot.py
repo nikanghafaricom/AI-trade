@@ -1,9 +1,8 @@
 # ==============================================
-# Hybrid Signal Bot - چند ارزی + کم‌مصرف
+# Hybrid Signal Bot - چند ارزی + کم‌مصرف (اصلاح‌شده)
 # ==============================================
-# نصب:
-# pip install ccxt pandas pandas-ta openai requests
 
+import os
 import time
 import logging
 import requests
@@ -12,37 +11,39 @@ from typing import Dict, Optional, List
 import pandas as pd
 import ccxt
 from openai import OpenAI
+from dotenv import load_dotenv
+
+# بارگذاری متغیرهای محیطی از فایل .env سرور
+load_dotenv()
 
 # ==================== تنظیمات ====================
 class Config:
     # ---------- صرافی ----------
     EXCHANGE_ID = "binance"
-    API_KEY = ""                  # فعلاً خالی بذار (داده عمومی کافیه)
+    API_KEY = ""                  # فعلاً خالی (داده عمومی کافیه)
     SECRET = ""
     PASSWORD = ""
 
-    # ---------- هوش مصنوعی (xAI / Grok) ----------
-    AI_API_KEY = "YOUR_XAI_API_KEY"          # ← فقط این را پر کن
-    AI_BASE_URL = "https://api.x.ai/v1"      # برای Grok
-    AI_MODEL = "grok-3"                      # یا grok-3-mini اگر موجود بود
+    # ---------- هوش مصنوعی (Groq) ----------
+    AI_API_KEY = os.getenv("GROQ_API_KEY")
+    AI_BASE_URL = "https://api.groq.com/openai/v1"
+    AI_MODEL = "llama-3.3-70b-versatile"
 
     # ---------- تلگرام ----------
-    TELEGRAM_BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"   # ← پر کن
-    TELEGRAM_CHAT_ID = "YOUR_CHAT_ID"                # ← پر کن
+    TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+    TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-    # ---------- ارزها (هر چی خواستی اضافه کن) ----------
+    # ---------- ارزها ----------
     SYMBOLS = [
         "BTC/USDT",
         "ETH/USDT",
         "SOL/USDT",
         "BNB/USDT",
         "XRP/USDT",
-        # "DOGE/USDT",
-        # "ADA/USDT",
     ]
 
     TIMEFRAME = "15m"
-    CHECK_INTERVAL = 300          # هر ۵ دقیقه یک‌بار (توصیه می‌شود)
+    CHECK_INTERVAL = 300          # هر ۵ دقیقه یک‌بار
 
     # مدیریت ریسک سیگنال
     MIN_CONFIDENCE_AI = 0.65
@@ -95,7 +96,7 @@ class AnalysisLayer:
         return df
 
     def get_ai_confirmation(self, symbol: str, side: str, latest: pd.Series) -> Dict:
-        """فقط وقتی قوانین سیگنال دادن صدا زده می‌شود"""
+        """تأیید سیگنال با هوش مصنوعی Groq"""
         prompt = f"""
 تو یک تحلیل‌گر کوتاه‌مدت بازار کریپتو هستی.
 سیگنال قوانین تکنیکال: {side}
@@ -202,7 +203,7 @@ class HybridTradingSystem:
 
             rule_signal = self.signal_engine.get_rule_signal(df)
             if not rule_signal:
-                return  # هیچ سیگنال قانونی نبود → هوش مصنوعی صدا زده نمی‌شود
+                return  # هیچ سیگنالی نبود
 
             latest = df.iloc[-1]
             logger.info(f"{symbol} | قانون گفت: {rule_signal} → در حال تأیید با AI...")
@@ -221,7 +222,7 @@ class HybridTradingSystem:
         logger.info("----- شروع بررسی همه ارزها -----")
         for symbol in self.config.SYMBOLS:
             self.process_symbol(symbol)
-            time.sleep(1.5)  # کمی فاصله بین ارزها برای رعایت ریت‌لیمیت
+            time.sleep(1.5)
 
     def start(self):
         logger.info("بات سیگنال چند ارزی شروع شد")
