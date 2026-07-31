@@ -210,6 +210,22 @@ class TelegramSender:
         self.config = config
         self.base_url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}"
 
+    def send_startup_message(self):
+        message = """🚀 **ربات تحلیلی هوش مصنوعی فعال شد!**
+از این پس موقعیت‌های مناسب بازار برات ارسال میشه."""
+        try:
+            requests.post(
+                f"{self.base_url}/sendMessage",
+                json={
+                    "chat_id": self.config.TELEGRAM_CHAT_ID,
+                    "text": message,
+                    "parse_mode": "Markdown"
+                },
+                timeout=10
+            )
+        except Exception as e:
+            logger.error(f"خطای ارسال پیام استارت تلگرام: {e}")
+
     def send_signal(self, symbol: str, side: str, latest: Dict, confidence: float):
         side_fa = "خرید" if side == "BUY" else "فروش"
         display_symbol = f"{symbol[:-4]}/USDT" if symbol.endswith("USDT") else symbol
@@ -284,6 +300,7 @@ class HybridTradingSystem:
     def start(self):
         logger.info("بات سیگنال چند ارزی (نسخه سبک) شروع شد")
         logger.info(f"ارزها: {', '.join(self.config.SYMBOLS)}")
+        self.telegram.send_startup_message() # ارسال پیام استارت به تلگرام
         while self.running:
             self.run_once()
             time.sleep(self.config.CHECK_INTERVAL)
