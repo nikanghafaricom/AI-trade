@@ -1,8 +1,8 @@
 # ==============================================
-# Hybrid Signal Bot - نسخه امن (بدون کلید داخل کد)
+# Hybrid Signal Bot - نسخه امن (بهینه‌شده بدون pandas-ta)
 # ==============================================
 # نصب کتابخانه‌ها:
-# pip install ccxt pandas pandas-ta openai requests python-dotenv
+# pip install ccxt pandas openai requests python-dotenv
 
 import os
 import time
@@ -99,12 +99,26 @@ class AnalysisLayer:
         )
 
     def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-        import pandas_ta as ta
         df = df.copy()
-        df['rsi'] = ta.rsi(df['close'], length=14)
-        df['ema_fast'] = ta.ema(df['close'], length=20)
-        df['ema_slow'] = ta.ema(df['close'], length=50)
-        df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
+        
+        # محاسبه سبک و بومی RSI بدون pandas-ta
+        delta = df['close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        df['rsi'] = 100 - (100 / (1 + rs))
+
+        # محاسبه سبک EMA
+        df['ema_fast'] = df['close'].ewm(span=20, adjust=False).mean()
+        df['ema_slow'] = df['close'].ewm(span=50, adjust=False).mean()
+
+        # محاسبه سبک ATR
+        high_low = df['high'] - df['low']
+        high_close = (df['high'] - df['close'].shift()).abs()
+        low_close = (df['low'] - df['close'].shift()).abs()
+        tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+        df['atr'] = tr.rolling(window=14).mean()
+
         return df
 
     def get_ai_confirmation(self, symbol: str, side: str, latest: pd.Series) -> Dict:
