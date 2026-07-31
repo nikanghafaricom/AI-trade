@@ -1,6 +1,8 @@
 # ==============================================
-# Hybrid Signal Bot - نسخه فوق‌العاده سبک (No Pandas / No CCXT)
+# Hybrid Signal Bot - نسخه امن (بدون کلید داخل کد)
 # ==============================================
+# نصب کتابخانه‌ها:
+# pip install ccxt pandas pandas-ta openai requests python-dotenv
 
 import os
 import time
@@ -8,18 +10,26 @@ import logging
 import requests
 from datetime import datetime
 from typing import Dict, Optional, List
+import pandas as pd
+import ccxt
 from openai import OpenAI
 from dotenv import load_dotenv
 
-# بارگذاری فایل .env
+# بارگذاری فایل .env (فقط برای محیط محلی)
 load_dotenv()
 
 # ==================== تنظیمات ====================
 class Config:
-    # ---------- هوش مصنوعی (Groq / xAI) ----------
-    AI_API_KEY = os.getenv("GROQ_API_KEY") or os.getenv("AI_API_KEY")
-    AI_BASE_URL = os.getenv("AI_BASE_URL", "https://api.groq.com/openai/v1")
-    AI_MODEL = os.getenv("AI_MODEL", "llama-3.3-70b-versatile")
+    # ---------- صرافی ----------
+    EXCHANGE_ID = "binance"
+    API_KEY = os.getenv("EXCHANGE_API_KEY", "")
+    SECRET = os.getenv("EXCHANGE_SECRET", "")
+    PASSWORD = os.getenv("EXCHANGE_PASSWORD", "")
+
+    # ---------- هوش مصنوعی (xAI / Grok) ----------
+    AI_API_KEY = os.getenv("AI_API_KEY")
+    AI_BASE_URL = os.getenv("AI_BASE_URL", "https://api.x.ai/v1")
+    AI_MODEL = os.getenv("AI_MODEL", "grok-3")
 
     # ---------- تلگرام ----------
     TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -27,18 +37,26 @@ class Config:
 
     # ---------- ارزها ----------
     SYMBOLS = [
-        "BTCUSDT",
-        "ETHUSDT",
-        "SOLUSDT",
-        "BNBUSDT",
-        "XRPUSDT",
+        "BTC/USDT",
+        "ETH/USDT",
+        "SOL/USDT",
+        "BNB/USDT",
+        "XRP/USDT",
+        "AVAX/USDT",
+        "LINK/USDT",
+        "NEAR/USDT",
+        "SUI/USDT",
+        "ADA/USDT",
+        "DOT/USDT",
     ]
 
     TIMEFRAME = "15m"
     CHECK_INTERVAL = 300          # هر ۵ دقیقه
+
     MIN_CONFIDENCE_AI = 0.65
 
     def validate(self):
+        """چک کردن وجود کلیدهای ضروری"""
         required = {
             "AI_API_KEY": self.AI_API_KEY,
             "TELEGRAM_BOT_TOKEN": self.TELEGRAM_BOT_TOKEN,
@@ -59,75 +77,23 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ==================== لایه دریافت داده از بایننس ====================
+# ==================== لایه داده ====================
 class DataLayer:
     def __init__(self, config: Config):
         self.config = config
-        self.base_url = "https://api.binance.com/api/v3/klines"
+        exchange_class = getattr(ccxt, config.EXCHANGE_ID)
+        self.exchange = exchange_class({
+            'apiKey': config.API_KEY,
+            'secret': config.SECRET,
+            'enableRateLimit': True,
+            'options': {'defaultType': 'spot'}
+        })
 
-    def fetch_ohlcv(self, symbol: str, limit: int = 100) -> List[Dict]:
-        params = {
-            'symbol': symbol,
-            'interval': self.config.TIMEFRAME,
-            'limit': limit
-        }
-        try:
-            res = requests.get(self.base_url, params=params, timeout=10)
-            res.raise_for_status()
-            data = res.json()
-            candles = []
-            for item in data:
-                candles.append({
-                    'timestamp': item[0],
-                    'open': float(item[1]),
-                    'high': float(item[2]),
-                    'low': float(item[3]),
-                    'close': float(item[4]),
-                    'volume': float(item[5])
-                })
-            return candles
-        except Exception as e:
-            logger.error(f"خطا در دریافت کندل‌های {symbol}: {e}")
-            return []
-
-# ==================== توابع ریاضی سبک اندیکاتورها ====================
-def calc_rsi(closes: List[float], length: int = 14) -> List[float]:
-    if len(closes) < length + 1:
-        return []
-    gains, losses = [], []
-    for i in range(1, len(closes)):
-        change = closes[i] - closes[i - 1]
-        gains.append(change if change > 0 else 0.0)
-        losses.append(abs(change) if change < 0 else 0.0)
-
-    rsi = [0.0] * len(closes)
-    avg_gain = sum(gains[:length]) / length
-    avg_loss = sum(losses[:length]) / length
-
-    for i in range(length, len(closes)):
-        if i > length:
-            avg_gain = (avg_gain * (length - 1) + gains[i - 1]) / length
-            avg_loss = (avg_loss * (length - 1) + losses[i - 1]) / length
-
-        if avg_loss == 0:
-            rsi[i] = 100.0
-        else:
-            rs = avg_gain / avg_loss
-            rsi[i] = 100.0 - (100.0 / (1.0 + rs))
-
-    return rsi
-
-def calc_ema(closes: List[float], length: int) -> List[float]:
-    if len(closes) < length:
-        return []
-    k = 2.0 / (length + 1)
-    ema = [0.0] * len(closes)
-    ema[length - 1] = sum(closes[:length]) / length
-
-    for i in range(length, len(closes)):
-        ema[i] = (closes[i] * k) + (ema[i - 1] * (1 - k))
-
-    return ema
+    def fetch_ohlcv(self, symbol: str, limit: int = 100) -> pd.DataFrame:
+        ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe=self.config.TIMEFRAME, limit=limit)
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        return df
 
 # ==================== لایه تحلیل ====================
 class AnalysisLayer:
@@ -138,21 +104,16 @@ class AnalysisLayer:
             base_url=config.AI_BASE_URL
         )
 
-    def calculate_indicators(self, candles: List[Dict]) -> Dict:
-        closes = [c['close'] for c in candles]
-        rsi_list = calc_rsi(closes, length=14)
-        ema20_list = calc_ema(closes, length=20)
-        ema50_list = calc_ema(closes, length=50)
+    def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        import pandas_ta as ta
+        df = df.copy()
+        df['rsi'] = ta.rsi(df['close'], length=14)
+        df['ema_fast'] = ta.ema(df['close'], length=20)
+        df['ema_slow'] = ta.ema(df['close'], length=50)
+        df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
+        return df
 
-        latest_candle = candles[-1]
-        return {
-            'close': latest_candle['close'],
-            'rsi': rsi_list[-1] if rsi_list else 0.0,
-            'ema_fast': ema20_list[-1] if ema20_list else 0.0,
-            'ema_slow': ema50_list[-1] if ema50_list else 0.0,
-        }
-
-    def get_ai_confirmation(self, symbol: str, side: str, latest: Dict) -> Dict:
+    def get_ai_confirmation(self, symbol: str, side: str, latest: pd.Series) -> Dict:
         prompt = f"""
 تو یک تحلیل‌گر کوتاه‌مدت بازار کریپتو هستی.
 سیگنال قوانین تکنیکال: {side}
@@ -194,8 +155,9 @@ class SignalEngine:
     def __init__(self, config: Config):
         self.config = config
 
-    def get_rule_signal(self, latest: Dict) -> Optional[str]:
-        if not latest['rsi'] or not latest['ema_fast']:
+    def get_rule_signal(self, df: pd.DataFrame) -> Optional[str]:
+        latest = df.iloc[-1]
+        if pd.isna(latest['rsi']) or pd.isna(latest['ema_fast']):
             return None
 
         if latest['ema_fast'] > latest['ema_slow'] and latest['rsi'] < 35:
@@ -210,29 +172,12 @@ class TelegramSender:
         self.config = config
         self.base_url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}"
 
-    def send_startup_message(self):
-        message = """🚀 **ربات تحلیلی هوش مصنوعی فعال شد!**
-از این پس موقعیت‌های مناسب بازار برات ارسال میشه."""
-        try:
-            requests.post(
-                f"{self.base_url}/sendMessage",
-                json={
-                    "chat_id": self.config.TELEGRAM_CHAT_ID,
-                    "text": message,
-                    "parse_mode": "Markdown"
-                },
-                timeout=10
-            )
-        except Exception as e:
-            logger.error(f"خطای ارسال پیام استارت تلگرام: {e}")
-
-    def send_signal(self, symbol: str, side: str, latest: Dict, confidence: float):
+    def send_signal(self, symbol: str, side: str, latest: pd.Series, confidence: float):
         side_fa = "خرید" if side == "BUY" else "فروش"
-        display_symbol = f"{symbol[:-4]}/USDT" if symbol.endswith("USDT") else symbol
         message = f"""
 🔔 **سیگنال جدید**
 
-[{display_symbol}]
+[{symbol}]
 الان: **{side_fa}**
 
 قیمت: `{latest['close']}`
@@ -262,7 +207,7 @@ RSI: `{latest['rsi']:.2f}`
 class HybridTradingSystem:
     def __init__(self):
         self.config = Config()
-        self.config.validate()
+        self.config.validate()          # چک کردن کلیدها
         self.data = DataLayer(self.config)
         self.analysis = AnalysisLayer(self.config)
         self.signal_engine = SignalEngine(self.config)
@@ -271,16 +216,16 @@ class HybridTradingSystem:
 
     def process_symbol(self, symbol: str):
         try:
-            candles = self.data.fetch_ohlcv(symbol)
-            if not candles:
-                return
+            df = self.data.fetch_ohlcv(symbol)
+            df = self.analysis.calculate_indicators(df)
 
-            latest = self.analysis.calculate_indicators(candles)
-            rule_signal = self.signal_engine.get_rule_signal(latest)
+            rule_signal = self.signal_engine.get_rule_signal(df)
             if not rule_signal:
                 return
 
+            latest = df.iloc[-1]
             logger.info(f"{symbol} | قانون گفت: {rule_signal} → در حال تأیید با AI...")
+
             ai_result = self.analysis.get_ai_confirmation(symbol, rule_signal, latest)
 
             if ai_result["confirmed"] and ai_result["confidence"] >= self.config.MIN_CONFIDENCE_AI:
@@ -295,12 +240,11 @@ class HybridTradingSystem:
         logger.info("----- شروع بررسی همه ارزها -----")
         for symbol in self.config.SYMBOLS:
             self.process_symbol(symbol)
-            time.sleep(1)
+            time.sleep(1.5)
 
     def start(self):
-        logger.info("بات سیگنال چند ارزی (نسخه سبک) شروع شد")
+        logger.info("بات سیگنال چند ارزی شروع شد")
         logger.info(f"ارزها: {', '.join(self.config.SYMBOLS)}")
-        self.telegram.send_startup_message() # ارسال پیام استارت به تلگرام
         while self.running:
             self.run_once()
             time.sleep(self.config.CHECK_INTERVAL)
