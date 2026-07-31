@@ -1,6 +1,8 @@
 # ==============================================
-# Hybrid Signal Bot - چند ارزی + کم‌مصرف (اصلاح‌شده)
+# Hybrid Signal Bot - نسخه امن (بدون کلید داخل کد)
 # ==============================================
+# نصب کتابخانه‌ها:
+# pip install ccxt pandas pandas-ta openai requests python-dotenv
 
 import os
 import time
@@ -13,21 +15,21 @@ import ccxt
 from openai import OpenAI
 from dotenv import load_dotenv
 
-# بارگذاری متغیرهای محیطی از فایل .env سرور
+# بارگذاری فایل .env (فقط برای محیط محلی)
 load_dotenv()
 
 # ==================== تنظیمات ====================
 class Config:
     # ---------- صرافی ----------
     EXCHANGE_ID = "binance"
-    API_KEY = ""                  # فعلاً خالی (داده عمومی کافیه)
-    SECRET = ""
-    PASSWORD = ""
+    API_KEY = os.getenv("EXCHANGE_API_KEY", "")
+    SECRET = os.getenv("EXCHANGE_SECRET", "")
+    PASSWORD = os.getenv("EXCHANGE_PASSWORD", "")
 
-    # ---------- هوش مصنوعی (Groq) ----------
-    AI_API_KEY = os.getenv("GROQ_API_KEY")
-    AI_BASE_URL = "https://api.groq.com/openai/v1"
-    AI_MODEL = "llama-3.3-70b-versatile"
+    # ---------- هوش مصنوعی (xAI / Grok) ----------
+    AI_API_KEY = os.getenv("AI_API_KEY")
+    AI_BASE_URL = os.getenv("AI_BASE_URL", "https://api.x.ai/v1")
+    AI_MODEL = os.getenv("AI_MODEL", "grok-3")
 
     # ---------- تلگرام ----------
     TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -43,10 +45,20 @@ class Config:
     ]
 
     TIMEFRAME = "15m"
-    CHECK_INTERVAL = 300          # هر ۵ دقیقه یک‌بار
+    CHECK_INTERVAL = 300          # هر ۵ دقیقه
 
-    # مدیریت ریسک سیگنال
     MIN_CONFIDENCE_AI = 0.65
+
+    def validate(self):
+        """چک کردن وجود کلیدهای ضروری"""
+        required = {
+            "AI_API_KEY": self.AI_API_KEY,
+            "TELEGRAM_BOT_TOKEN": self.TELEGRAM_BOT_TOKEN,
+            "TELEGRAM_CHAT_ID": self.TELEGRAM_CHAT_ID,
+        }
+        missing = [key for key, value in required.items() if not value]
+        if missing:
+            raise ValueError(f"این متغیرهای محیطی تنظیم نشدن: {', '.join(missing)}")
 
 # ==================== لاگ ====================
 logging.basicConfig(
@@ -96,7 +108,6 @@ class AnalysisLayer:
         return df
 
     def get_ai_confirmation(self, symbol: str, side: str, latest: pd.Series) -> Dict:
-        """تأیید سیگنال با هوش مصنوعی Groq"""
         prompt = f"""
 تو یک تحلیل‌گر کوتاه‌مدت بازار کریپتو هستی.
 سیگنال قوانین تکنیکال: {side}
@@ -190,6 +201,7 @@ RSI: `{latest['rsi']:.2f}`
 class HybridTradingSystem:
     def __init__(self):
         self.config = Config()
+        self.config.validate()          # چک کردن کلیدها
         self.data = DataLayer(self.config)
         self.analysis = AnalysisLayer(self.config)
         self.signal_engine = SignalEngine(self.config)
@@ -203,7 +215,7 @@ class HybridTradingSystem:
 
             rule_signal = self.signal_engine.get_rule_signal(df)
             if not rule_signal:
-                return  # هیچ سیگنالی نبود
+                return
 
             latest = df.iloc[-1]
             logger.info(f"{symbol} | قانون گفت: {rule_signal} → در حال تأیید با AI...")
@@ -213,7 +225,7 @@ class HybridTradingSystem:
             if ai_result["confirmed"] and ai_result["confidence"] >= self.config.MIN_CONFIDENCE_AI:
                 self.telegram.send_signal(symbol, rule_signal, latest, ai_result["confidence"])
             else:
-                logger.info(f"{symbol} | AI رد کرد یا اطمینان کم بود")
+                logger.info(f"{symbol} | AI رد کرد")
 
         except Exception as e:
             logger.error(f"خطا در پردازش {symbol}: {e}")
@@ -227,8 +239,6 @@ class HybridTradingSystem:
     def start(self):
         logger.info("بات سیگنال چند ارزی شروع شد")
         logger.info(f"ارزها: {', '.join(self.config.SYMBOLS)}")
-        logger.info(f"فاصله بررسی: هر {self.config.CHECK_INTERVAL} ثانیه")
-
         while self.running:
             self.run_once()
             time.sleep(self.config.CHECK_INTERVAL)
