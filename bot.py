@@ -202,6 +202,21 @@ class TelegramSender:
         self.config = config
         self.base_url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}"
 
+    def send_system_status(self, text: str):
+        """ارسال پیام‌های سیستمی مانند راه‌اندازی"""
+        try:
+            requests.post(
+                f"{self.base_url}/sendMessage",
+                json={
+                    "chat_id": self.config.TELEGRAM_CHAT_ID,
+                    "text": text,
+                    "parse_mode": "Markdown"
+                },
+                timeout=10
+            )
+        except Exception as e:
+            logger.error(f"خطای ارسال پیام سیستمی به تلگرام: {e}")
+
     def send_signal(self, symbol: str, side: str, latest: pd.Series, confidence: float):
         side_fa = "خرید" if side == "BUY" else "فروش"
         message = f"""
@@ -275,6 +290,11 @@ class HybridTradingSystem:
     def start(self):
         logger.info("بات سیگنال چند ارزی شروع شد")
         logger.info(f"ارزها: {', '.join(self.config.SYMBOLS)}")
+        
+        # ارسال پیام شروع به تلگرام
+        start_message = f"🚀 **ربات سیگنال‌دهی با موفقیت روی سرور روشن شد.**\n\n⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}\nارزهای فعال: {', '.join(self.config.SYMBOLS)}"
+        self.telegram.send_system_status(start_message)
+
         while self.running:
             self.run_once()
             gc.collect()  # پاکسازی اجباری حافظه RAM پس از هر دور بررسی کامل
