@@ -8,6 +8,7 @@ import os
 import time
 import logging
 import requests
+import gc  # <--- اضافه شد: جهت مدیریت و پاکسازی RAM
 from datetime import datetime
 from typing import Dict, Optional, List
 import pandas as pd
@@ -255,6 +256,7 @@ class HybridTradingSystem:
         logger.info(f"ارزها: {', '.join(self.config.SYMBOLS)}")
         while self.running:
             self.run_once()
+            gc.collect()  # <--- اضافه شد: پاکسازی اجباری حافظه RAM پس از هر دور بررسی کامل
             time.sleep(self.config.CHECK_INTERVAL)
 
     def stop(self):
