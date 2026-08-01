@@ -8,7 +8,9 @@ import os
 import time
 import logging
 import requests
-import gc  # <--- اضافه شد: جهت مدیریت و پاکسازی RAM
+import gc  # <--- جهت مدیریت و پاکسازی RAM
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
 from typing import Dict, Optional, List
 import pandas as pd
@@ -19,10 +21,29 @@ from dotenv import load_dotenv
 # بارگذاری فایل .env (فقط برای محیط محلی)
 load_dotenv()
 
+# ==================== وب‌سرور سبک برای Render ====================
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/html")
+        self.end_headers()
+        self.wfile.write(b"Bot is alive!")
+
+    def log_message(self, format, *args):
+        return  # خاموش کردن لاگ‌های اضافه وب‌سرور
+
+def start_health_check_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    server.serve_forever()
+
+# اجرا در یک تاپیک جداگانه تا مانع کار ربات نشود
+threading.Thread(target=start_health_check_server, daemon=True).start()
+
 # ==================== تنظیمات ====================
 class Config:
-    # ---------- صرافی ----------
-    EXCHANGE_ID = "binance"
+    # ---------- صرافی (تغییر یافته به coinex جهت رفع ارور 451) ----------
+    EXCHANGE_ID = "coinex"
     API_KEY = os.getenv("EXCHANGE_API_KEY", "")
     SECRET = os.getenv("EXCHANGE_SECRET", "")
     PASSWORD = os.getenv("EXCHANGE_PASSWORD", "")
@@ -256,7 +277,7 @@ class HybridTradingSystem:
         logger.info(f"ارزها: {', '.join(self.config.SYMBOLS)}")
         while self.running:
             self.run_once()
-            gc.collect()  # <--- اضافه شد: پاکسازی اجباری حافظه RAM پس از هر دور بررسی کامل
+            gc.collect()  # پاکسازی اجباری حافظه RAM پس از هر دور بررسی کامل
             time.sleep(self.config.CHECK_INTERVAL)
 
     def stop(self):
