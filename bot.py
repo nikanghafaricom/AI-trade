@@ -2,7 +2,7 @@
 # Hybrid Signal Bot - نسخه امن (بهینه‌شده بدون pandas-ta)
 # ==============================================
 # نصب کتابخانه‌ها:
-# pip install ccxt pandas openai requests python-dotenv
+# pip install ccxt pandas openai requests python-dotenv flask
 
 import os
 import time
@@ -10,38 +10,40 @@ import logging
 import requests
 import gc  # <--- جهت مدیریت و پاکسازی RAM
 import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
 from typing import Dict, Optional, List
 import pandas as pd
 import ccxt
 from openai import OpenAI
 from dotenv import load_dotenv
+from flask import Flask
 
 # بارگذاری فایل .env (فقط برای محیط محلی)
 load_dotenv()
 
-# ==================== وب‌سرور سبک برای Render (بهینه‌شده برای پورت‌های دینامیک) ====================
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-type", "text/html; charset=utf-8")
-        self.end_headers()
-        self.wfile.write(b"Bot is alive and running!")
+# ==================== وب‌سرور استاندارد Flask جهت رفع ارور 501 ====================
+app = Flask(__name__)
 
-    def log_message(self, format, *args):
-        return  # خاموش کردن لاگ‌های اضافه وب‌سرور جهت خلوت ماندن کنسول
+# خاموش کردن لاگ‌های اضافی Flask برای خلوت ماندن کنسول
+log = logging.getLogger('werkzeug')
+log.setLevel(logging.ERROR)
+
+@app.route('/')
+def health_check():
+    return "Bot is alive and running!", 200
+
+@app.route('/head', methods=['HEAD'])
+def health_check_head():
+    return "", 200
 
 def start_health_check_server():
-    # دریافت پورتی که Render اختصاص می‌دهد (پیش‌فرض 10000)
     port = int(os.environ.get("PORT", 10000))
     try:
-        server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
-        server.serve_forever()
+        app.run(host="0.0.0.0", port=port)
     except Exception as e:
-        logger.error(f"خطا در اجرای وب‌سرویس پینگ: {e}")
+        logger.error(f"خطا در اجرای وب‌سرور: {e}")
 
-# اجرا در یک ترد جداگانه تا مانع کار ربات نشود
+# اجرا در یک تاپیک جداگانه
 threading.Thread(target=start_health_check_server, daemon=True).start()
 
 # ==================== تنظیمات ====================
