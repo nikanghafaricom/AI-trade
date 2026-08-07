@@ -1,45 +1,45 @@
 # ==============================================
-# Hybrid Signal Bot - نسخه امن (بهینه‌شده بدون pandas-ta)
+# Hybrid Signal Bot - نسخه امن (بهینه‌شده بدون pandas-ta و Flask)
 # ==============================================
-# نصب کتابخانه‌ها:
-# pip install ccxt pandas openai requests python-dotenv flask
-
 import os
 import time
 import logging
 import requests
 import gc  # <--- جهت مدیریت و پاکسازی RAM
 import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
 from typing import Dict, Optional, List
 import pandas as pd
 import ccxt
 from openai import OpenAI
 from dotenv import load_dotenv
-from flask import Flask
 
 # بارگذاری فایل .env (فقط برای محیط محلی)
 load_dotenv()
 
-# ==================== وب‌سرور استاندارد Flask جهت رفع ارور 501 ====================
-app = Flask(__name__)
+# ==================== وب‌سرور استاندارد بدون نیازمندی به کتابخانه اضافی ====================
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/html; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"Bot is alive and running!")
 
-# خاموش کردن لاگ‌های اضافی Flask برای خلوت ماندن کنسول
-log = logging.getLogger('werkzeug')
-log.setLevel(logging.ERROR)
+    def do_HEAD(self):
+        # پاسخ به درخواست‌های HEAD برای رفع ارور 501 در UptimeRobot
+        self.send_response(200)
+        self.send_header("Content-type", "text/html; charset=utf-8")
+        self.end_headers()
 
-@app.route('/')
-def health_check():
-    return "Bot is alive and running!", 200
-
-@app.route('/head', methods=['HEAD'])
-def health_check_head():
-    return "", 200
+    def log_message(self, format, *args):
+        return  # خاموش کردن لاگ‌های اضافه وب‌سرور
 
 def start_health_check_server():
     port = int(os.environ.get("PORT", 10000))
     try:
-        app.run(host="0.0.0.0", port=port)
+        server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+        server.serve_forever()
     except Exception as e:
         logger.error(f"خطا در اجرای وب‌سرور: {e}")
 
