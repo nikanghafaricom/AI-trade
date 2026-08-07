@@ -21,23 +21,26 @@ from dotenv import load_dotenv
 # بارگذاری فایل .env (فقط برای محیط محلی)
 load_dotenv()
 
-# ==================== وب‌سرور سبک برای Render ====================
+# ==================== وب‌سرور سبک برای Render (بهینه‌شده) ====================
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
-        self.send_header("Content-type", "text/html")
+        self.send_header("Content-type", "text/html; charset=utf-8")
         self.end_headers()
-        self.wfile.write(b"Bot is alive!")
+        self.wfile.write(b"Bot is alive and running!")
 
     def log_message(self, format, *args):
-        return  # خاموش کردن لاگ‌های اضافه وب‌سرور
+        return  # خاموش کردن لاگ‌های اضافه وب‌سرور جهت خلوت ماندن کنسول
 
 def start_health_check_server():
     port = int(os.environ.get("PORT", 8080))
-    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
-    server.serve_forever()
+    try:
+        server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+        server.serve_forever()
+    except Exception as e:
+        logger.error(f"خطا در اجرای وب‌سرویس پینگ: {e}")
 
-# اجرا در یک تاپیک جداگانه تا مانع کار ربات نشود
+# اجرا در یک ترد جداگانه تا مانع کار ربات نشود
 threading.Thread(target=start_health_check_server, daemon=True).start()
 
 # ==================== تنظیمات ====================
