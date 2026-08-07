@@ -21,7 +21,7 @@ from dotenv import load_dotenv
 # بارگذاری فایل .env (فقط برای محیط محلی)
 load_dotenv()
 
-# ==================== وب‌سرور سبک برای Render (بهینه‌شده) ====================
+# ==================== وب‌سرور سبک برای Render (بهینه‌شده برای پورت‌های دینامیک) ====================
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -33,7 +33,8 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         return  # خاموش کردن لاگ‌های اضافه وب‌سرور جهت خلوت ماندن کنسول
 
 def start_health_check_server():
-    port = int(os.environ.get("PORT", 8080))
+    # دریافت پورتی که Render اختصاص می‌دهد (پیش‌فرض 10000)
+    port = int(os.environ.get("PORT", 10000))
     try:
         server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
         server.serve_forever()
