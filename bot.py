@@ -193,13 +193,26 @@ class SignalEngine:
 
     def get_rule_signal(self, df: pd.DataFrame) -> Optional[str]:
         latest = df.iloc[-1]
-        if pd.isna(latest['rsi']) or pd.isna(latest['ema_fast']):
+        prev = df.iloc[-2]
+        
+        if pd.isna(latest['rsi']) or pd.isna(latest['ema_fast']) or pd.isna(latest['ema_slow']):
             return None
 
-        if latest['ema_fast'] > latest['ema_slow'] and latest['rsi'] < 35:
+        # منطق اصلاح‌شده و واقع‌بینانه:
+        # ۱. کراس‌اوور EMAها یا روند EMAها به همراه RSI منطقی
+        ema_bullish = latest['ema_fast'] > latest['ema_slow']
+        ema_bearish = latest['ema_fast'] < latest['ema_slow']
+
+        # سیگنال خرید: روند صعودی EMA و RSI خروج از منطقه اشباع فروش (یا RSI معقول زیر ۵۵)
+        rsi_buy = (prev['rsi'] < 40 and latest['rsi'] >= 40) or (latest['rsi'] > 45 and latest['rsi'] < 60)
+        if ema_bullish and rsi_buy:
             return "BUY"
-        if latest['ema_fast'] < latest['ema_slow'] and latest['rsi'] > 65:
+
+        # سیگنال فروش: روند نزولی EMA و RSI خروج از منطقه اشباع خرید (یا RSI معقول بالای ۴۵)
+        rsi_sell = (prev['rsi'] > 60 and latest['rsi'] <= 60) or (latest['rsi'] < 55 and latest['rsi'] > 40)
+        if ema_bearish and rsi_sell:
             return "SELL"
+
         return None
 
 # ==================== ارسال تلگرام ====================
@@ -224,17 +237,39 @@ class TelegramSender:
             logger.error(f"خطای ارسال پیام سیستمی به تلگرام: {e}")
 
     def send_signal(self, symbol: str, side: str, latest: pd.Series, confidence: float):
-        side_fa = "خرید" if side == "BUY" else "فروش"
+        emoji = "🟢" if side == "BUY" else "🔴"
+        direction = "LONG" if side == "BUY" else "SHORT"
+        price = float(latest['close'])
+        atr = float(latest['atr']) if not pd.isna(latest['atr']) else price * 0.01
+
+        # محاسبه هدف‌ها و حد زیان استاندارد بر اساس ATR
+        if side == "BUY":
+            tp1 = round(price + (1.0 * atr), 4)
+            tp2 = round(price + (2.0 * atr), 4)
+            tp3 = round(price + (3.0 * atr), 4)
+            stop_loss = round(price - (1.5 * atr), 4)
+        else:
+            tp1 = round(price - (1.0 * atr), 4)
+            tp2 = round(price - (2.0 * atr), 4)
+            tp3 = round(price - (3.0 * atr), 4)
+            stop_loss = round(price + (1.5 * atr), 4)
+
         message = f"""
-🔔 **سیگنال جدید**
+{emoji} **SIGNAL: {side} / {direction}**
 
-[{symbol}]
-الان: **{side_fa}**
+📍 **Symbol:** {symbol}
+⏱ **Timeframe:** {self.config.TIMEFRAME}
 
-قیمت: `{latest['close']}`
-RSI: `{latest['rsi']:.2f}`
-اطمینان: `{confidence:.0%}`
+💵 **Entry Price:** {price:,}
 
+🎯 **Targets:**
+  1️⃣ TP1: {tp1:,}
+  2️⃣ TP2: {tp2:,}
+  3️⃣ TP3: {tp3:,}
+
+🛑 **Stop-Loss:** {stop_loss:,}
+
+📊 **Analysis:** RSI: {latest['rsi']:.1f} | AI Confidence: {confidence:.0%}
 ⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}
 """
         try:
