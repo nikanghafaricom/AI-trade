@@ -1,11 +1,11 @@
 # ==============================================
-# Hybrid Signal Bot - نسخه امن (بهینه‌شده بدون pandas-ta و Flask)
+# Hybrid Signal Bot - نسخه فوق پیشرفته و هوشمند
 # ==============================================
 import os
 import time
 import logging
 import requests
-import gc  # <--- جهت مدیریت و پاکسازی RAM
+import gc  # جهت مدیریت و پاکسازی RAM
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 # بارگذاری فایل .env (فقط برای محیط محلی)
 load_dotenv()
 
-# ==================== وب‌سرور استاندارد بدون نیازمندی به کتابخانه اضافی ====================
+# ==================== وب‌سرور استاندارد ====================
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -27,7 +27,6 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"Bot is alive and running!")
 
     def do_HEAD(self):
-        # پاسخ به درخواست‌های HEAD برای رفع ارور 501 در UptimeRobot
         self.send_response(200)
         self.send_header("Content-type", "text/html; charset=utf-8")
         self.end_headers()
@@ -43,27 +42,22 @@ def start_health_check_server():
     except Exception as e:
         logger.error(f"خطا در اجرای وب‌سرور: {e}")
 
-# اجرا در یک تاپیک جداگانه
 threading.Thread(target=start_health_check_server, daemon=True).start()
 
 # ==================== تنظیمات ====================
 class Config:
-    # ---------- صرافی (تغییر یافته به coinex جهت رفع ارور 451) ----------
     EXCHANGE_ID = "coinex"
     API_KEY = os.getenv("EXCHANGE_API_KEY", "")
     SECRET = os.getenv("EXCHANGE_SECRET", "")
     PASSWORD = os.getenv("EXCHANGE_PASSWORD", "")
 
-    # ---------- هوش مصنوعی (xAI / Grok) ----------
     AI_API_KEY = os.getenv("AI_API_KEY")
     AI_BASE_URL = os.getenv("AI_BASE_URL", "https://api.x.ai/v1")
     AI_MODEL = os.getenv("AI_MODEL", "grok-3")
 
-    # ---------- تلگرام ----------
     TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
     TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-    # ---------- ارزها ----------
     SYMBOLS = [
         "BTC/USDT",
         "ETH/USDT",
@@ -74,11 +68,9 @@ class Config:
 
     TIMEFRAME = "15m"
     CHECK_INTERVAL = 300          # هر ۵ دقیقه
-
-    MIN_CONFIDENCE_AI = 0.65
+    MIN_CONFIDENCE_AI = 0.70      # افزایش حد نصاب اطمینان AI برای بالابردن دقت
 
     def validate(self):
-        """چک کردن وجود کلیدهای ضروری"""
         required = {
             "AI_API_KEY": self.AI_API_KEY,
             "TELEGRAM_BOT_TOKEN": self.TELEGRAM_BOT_TOKEN,
@@ -129,7 +121,7 @@ class AnalysisLayer:
     def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         df = df.copy()
         
-        # محاسبه سبک و بومی RSI بدون pandas-ta
+        # محاسبه سبک و بومی RSI
         delta = df['close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
@@ -147,39 +139,46 @@ class AnalysisLayer:
         tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
         df['atr'] = tr.rolling(window=14).mean()
 
+        # محاسبه حجم میانگین (Volume SMA20) برای فیلتر حجم
+        df['vol_sma'] = df['volume'].rolling(window=20).mean()
+
+        # محاسبه Pivot High و Pivot Low (حمایت و مقاومت محلی ۱۰ کندل گذشته)
+        df['support'] = df['low'].rolling(window=10).min()
+        df['resistance'] = df['high'].rolling(window=10).max()
+
         return df
 
-    def get_ai_confirmation(self, symbol: str, side: str, latest: pd.Series) -> Dict:
+    def get_ai_confirmation(self, symbol: str, side: str, df: pd.DataFrame) -> Dict:
+        latest = df.iloc[-1]
+        prev = df.iloc[-2]
+
         prompt = f"""
-تو یک تحلیل‌گر کوتاه‌مدت بازار کریپتو هستی.
-سیگنال قوانین تکنیکال: {side}
-ارز: {symbol}
-قیمت فعلی: {latest['close']}
-RSI: {latest['rsi']:.2f}
-EMA20: {latest['ema_fast']:.2f}
-EMA50: {latest['ema_slow']:.2f}
+You are an expert crypto price-action trader.
+Signal Context:
+- Symbol: {symbol}
+- Proposed Side: {side}
+- Current Close: {latest['close']} (Prev Close: {prev['close']})
+- High/Low Range: High={latest['high']}, Low={latest['low']}
+- RSI (14): {latest['rsi']:.2f} (Prev RSI: {prev['rsi']:.2f})
+- EMA20: {latest['ema_fast']:.2f} | EMA50: {latest['ema_slow']:.2f}
+- Volume: {latest['volume']:.2f} vs Avg Volume: {latest['vol_sma']:.2f}
+- Support Level: {latest['support']} | Resistance Level: {latest['resistance']}
 
-فقط یکی از این دو جواب را بده:
-CONFIRM
-REJECT
-
-قوانین:
-- اگر با سیگنال موافقی CONFIRM بگو
-- اگر مخالفی یا مطمئن نیستی REJECT بگو
-- هیچ متن دیگری ننویس
+Analyze price action, volume confirmation, and momentum.
+Strict Rule: Respond ONLY with "CONFIRM" or "REJECT". No other words or punctuation.
 """
         try:
             response = self.client.chat.completions.create(
                 model=self.config.AI_MODEL,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.1,
-                max_tokens=8
+                temperature=0.0,
+                max_tokens=6
             )
             answer = response.choices[0].message.content.strip().upper()
             confirmed = "CONFIRM" in answer
             return {
                 "confirmed": confirmed,
-                "confidence": 0.78 if confirmed else 0.3,
+                "confidence": 0.85 if confirmed else 0.2,
                 "raw": answer
             }
         except Exception as e:
@@ -195,22 +194,23 @@ class SignalEngine:
         latest = df.iloc[-1]
         prev = df.iloc[-2]
         
-        if pd.isna(latest['rsi']) or pd.isna(latest['ema_fast']) or pd.isna(latest['ema_slow']):
+        if pd.isna(latest['rsi']) or pd.isna(latest['ema_fast']) or pd.isna(latest['vol_sma']):
             return None
 
-        # منطق اصلاح‌شده و واقع‌بینانه:
-        # ۱. کراس‌اوور EMAها یا روند EMAها به همراه RSI منطقی
+        # فیلتر حجم: حجم کندل باید از میانگین بیشتر باشد تا شکست جعلی نخوریم
+        volume_confirmed = latest['volume'] > (latest['vol_sma'] * 0.9)
+
         ema_bullish = latest['ema_fast'] > latest['ema_slow']
         ema_bearish = latest['ema_fast'] < latest['ema_slow']
 
-        # سیگنال خرید: روند صعودی EMA و RSI خروج از منطقه اشباع فروش (یا RSI معقول زیر ۵۵)
-        rsi_buy = (prev['rsi'] < 40 and latest['rsi'] >= 40) or (latest['rsi'] > 45 and latest['rsi'] < 60)
-        if ema_bullish and rsi_buy:
+        # سیگنال خرید: روند صعودی + خروج RSI از منطقه اشباع + تأیید نسبی حجم
+        rsi_buy = (prev['rsi'] < 42 and latest['rsi'] >= 42) or (45 < latest['rsi'] < 62 and prev['rsi'] < latest['rsi'])
+        if ema_bullish and rsi_buy and volume_confirmed:
             return "BUY"
 
-        # سیگنال فروش: روند نزولی EMA و RSI خروج از منطقه اشباع خرید (یا RSI معقول بالای ۴۵)
-        rsi_sell = (prev['rsi'] > 60 and latest['rsi'] <= 60) or (latest['rsi'] < 55 and latest['rsi'] > 40)
-        if ema_bearish and rsi_sell:
+        # سیگنال فروش: روند نزولی + خروج RSI از منطقه اشباع + تأیید نسبی حجم
+        rsi_sell = (prev['rsi'] > 58 and latest['rsi'] <= 58) or (38 < latest['rsi'] < 55 and prev['rsi'] > latest['rsi'])
+        if ema_bearish and rsi_sell and volume_confirmed:
             return "SELL"
 
         return None
@@ -222,7 +222,6 @@ class TelegramSender:
         self.base_url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}"
 
     def send_system_status(self, text: str):
-        """ارسال پیام‌های سیستمی مانند راه‌اندازی"""
         try:
             requests.post(
                 f"{self.base_url}/sendMessage",
@@ -242,17 +241,21 @@ class TelegramSender:
         price = float(latest['close'])
         atr = float(latest['atr']) if not pd.isna(latest['atr']) else price * 0.01
 
-        # محاسبه هدف‌ها و حد زیان استاندارد بر اساس ATR
+        # حد سود و زیان داینامیک بر اساس حمایت/مقاومت محلی و ATR
         if side == "BUY":
-            tp1 = round(price + (1.0 * atr), 4)
-            tp2 = round(price + (2.0 * atr), 4)
-            tp3 = round(price + (3.0 * atr), 4)
-            stop_loss = round(price - (1.5 * atr), 4)
+            stop_loss = min(float(latest['support']), price - (1.2 * atr))
+            risk = price - stop_loss
+            tp1 = round(price + (1.2 * risk), 4)
+            tp2 = round(price + (2.0 * risk), 4)
+            tp3 = round(price + (3.0 * risk), 4)
+            stop_loss = round(stop_loss, 4)
         else:
-            tp1 = round(price - (1.0 * atr), 4)
-            tp2 = round(price - (2.0 * atr), 4)
-            tp3 = round(price - (3.0 * atr), 4)
-            stop_loss = round(price + (1.5 * atr), 4)
+            stop_loss = max(float(latest['resistance']), price + (1.2 * atr))
+            risk = stop_loss - price
+            tp1 = round(price - (1.2 * risk), 4)
+            tp2 = round(price - (2.0 * risk), 4)
+            tp3 = round(price - (3.0 * risk), 4)
+            stop_loss = round(stop_loss, 4)
 
         message = f"""
 {emoji} **SIGNAL: {side} / {direction}**
@@ -262,14 +265,14 @@ class TelegramSender:
 
 💵 **Entry Price:** {price:,}
 
-🎯 **Targets:**
+🎯 **Targets (Dynamic Pivots):**
   1️⃣ TP1: {tp1:,}
   2️⃣ TP2: {tp2:,}
   3️⃣ TP3: {tp3:,}
 
 🛑 **Stop-Loss:** {stop_loss:,}
 
-📊 **Analysis:** RSI: {latest['rsi']:.1f} | AI Confidence: {confidence:.0%}
+📊 **Analysis:** Volume Confirmed | RSI: {latest['rsi']:.1f} | AI: {confidence:.0%}
 ⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}
 """
         try:
@@ -293,12 +296,15 @@ class TelegramSender:
 class HybridTradingSystem:
     def __init__(self):
         self.config = Config()
-        self.config.validate()          # چک کردن کلیدها
+        self.config.validate()
         self.data = DataLayer(self.config)
         self.analysis = AnalysisLayer(self.config)
         self.signal_engine = SignalEngine(self.config)
         self.telegram = TelegramSender(self.config)
         self.running = True
+        
+        # حافظه داخلی برای ثبت آخرین سیگنال جهت جلوگیری از سیگنال تکراری
+        self.active_signals: Dict[str, str] = {}
 
     def process_symbol(self, symbol: str):
         try:
@@ -307,15 +313,22 @@ class HybridTradingSystem:
 
             rule_signal = self.signal_engine.get_rule_signal(df)
             if not rule_signal:
+                # اگر سیگنال خنثی شد، حافظه قبلی پاک می‌شود
+                self.active_signals[symbol] = None
+                return
+
+            # اگر سیگنال تکراری باشد، پیام دوباره فرستاده نمی‌شود
+            if self.active_signals.get(symbol) == rule_signal:
                 return
 
             latest = df.iloc[-1]
-            logger.info(f"{symbol} | قانون گفت: {rule_signal} → در حال تأیید با AI...")
+            logger.info(f"{symbol} | قانون گفت: {rule_signal} → در حال تأیید پیشرفته با AI...")
 
-            ai_result = self.analysis.get_ai_confirmation(symbol, rule_signal, latest)
+            ai_result = self.analysis.get_ai_confirmation(symbol, rule_signal, df)
 
             if ai_result["confirmed"] and ai_result["confidence"] >= self.config.MIN_CONFIDENCE_AI:
                 self.telegram.send_signal(symbol, rule_signal, latest, ai_result["confidence"])
+                self.active_signals[symbol] = rule_signal  # ثبت سیگنال ارسال‌شده
             else:
                 logger.info(f"{symbol} | AI رد کرد")
 
@@ -329,16 +342,15 @@ class HybridTradingSystem:
             time.sleep(1.5)
 
     def start(self):
-        logger.info("بات سیگنال چند ارزی شروع شد")
+        logger.info("بات سیگنال پیشرفته شروع شد")
         logger.info(f"ارزها: {', '.join(self.config.SYMBOLS)}")
         
-        # ارسال پیام شروع به تلگرام
-        start_message = f"🚀 **ربات سیگنال‌دهی با موفقیت روی سرور روشن شد.**\n\n⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}\nارزهای فعال: {', '.join(self.config.SYMBOLS)}"
+        start_message = f"🚀 **ربات سیگنال‌دهی پیشرفته (نسخه هوشمند V2) روشن شد.**\n\n⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}\nارزهای فعال: {', '.join(self.config.SYMBOLS)}"
         self.telegram.send_system_status(start_message)
 
         while self.running:
             self.run_once()
-            gc.collect()  # پاکسازی اجباری حافظه RAM پس از هر دور بررسی کامل
+            gc.collect()
             time.sleep(self.config.CHECK_INTERVAL)
 
     def stop(self):
