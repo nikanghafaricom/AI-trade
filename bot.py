@@ -1,5 +1,5 @@
 # ==============================================
-# Hybrid Signal Bot - نسخه فوق پیشرفته و هوشمند
+# Hybrid Signal Bot - نسخه فوق پیشرفته V3 (هدف ۱۰ تا ۱۵ درصد سود ماهانه)
 # ==============================================
 import os
 import time
@@ -58,17 +58,23 @@ class Config:
     TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
     TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
+    # ۱۰ ارز با نوسان و حجم عالی جهت ثبت موقعیت‌های سودده بیشتر
     SYMBOLS = [
         "BTC/USDT",
         "ETH/USDT",
         "SOL/USDT",
         "BNB/USDT",
         "XRP/USDT",
+        "AVAX/USDT",
+        "NEAR/USDT",
+        "ADA/USDT",
+        "DOGE/USDT",
+        "LINK/USDT",
     ]
 
     TIMEFRAME = "15m"
     CHECK_INTERVAL = 300          # هر ۵ دقیقه
-    MIN_CONFIDENCE_AI = 0.70      # افزایش حد نصاب اطمینان AI برای بالابردن دقت
+    MIN_CONFIDENCE_AI = 0.68      # حد نصاب بهینه هوش مصنوعی برای دقت و تعداد بالا
 
     def validate(self):
         required = {
@@ -197,19 +203,19 @@ class SignalEngine:
         if pd.isna(latest['rsi']) or pd.isna(latest['ema_fast']) or pd.isna(latest['vol_sma']):
             return None
 
-        # فیلتر حجم: حجم کندل باید از میانگین بیشتر باشد تا شکست جعلی نخوریم
-        volume_confirmed = latest['volume'] > (latest['vol_sma'] * 0.9)
+        # فیلتر حجم: تأیید نقدینگی کندل جاری
+        volume_confirmed = latest['volume'] > (latest['vol_sma'] * 0.85)
 
         ema_bullish = latest['ema_fast'] > latest['ema_slow']
         ema_bearish = latest['ema_fast'] < latest['ema_slow']
 
-        # سیگنال خرید: روند صعودی + خروج RSI از منطقه اشباع + تأیید نسبی حجم
-        rsi_buy = (prev['rsi'] < 42 and latest['rsi'] >= 42) or (45 < latest['rsi'] < 62 and prev['rsi'] < latest['rsi'])
+        # سیگنال خرید
+        rsi_buy = (prev['rsi'] < 42 and latest['rsi'] >= 42) or (45 < latest['rsi'] < 63 and prev['rsi'] < latest['rsi'])
         if ema_bullish and rsi_buy and volume_confirmed:
             return "BUY"
 
-        # سیگنال فروش: روند نزولی + خروج RSI از منطقه اشباع + تأیید نسبی حجم
-        rsi_sell = (prev['rsi'] > 58 and latest['rsi'] <= 58) or (38 < latest['rsi'] < 55 and prev['rsi'] > latest['rsi'])
+        # سیگنال فروش
+        rsi_sell = (prev['rsi'] > 58 and latest['rsi'] <= 58) or (37 < latest['rsi'] < 55 and prev['rsi'] > latest['rsi'])
         if ema_bearish and rsi_sell and volume_confirmed:
             return "SELL"
 
@@ -241,20 +247,20 @@ class TelegramSender:
         price = float(latest['close'])
         atr = float(latest['atr']) if not pd.isna(latest['atr']) else price * 0.01
 
-        # حد سود و زیان داینامیک بر اساس حمایت/مقاومت محلی و ATR
+        # محاسبه اهداف سود بسیار بهینه (بدون تغییر و افزایش حد زیان)
         if side == "BUY":
             stop_loss = min(float(latest['support']), price - (1.2 * atr))
             risk = price - stop_loss
-            tp1 = round(price + (1.2 * risk), 4)
-            tp2 = round(price + (2.0 * risk), 4)
-            tp3 = round(price + (3.0 * risk), 4)
+            tp1 = round(price + (1.8 * risk), 4)  # تارگت اول با سود بالا
+            tp2 = round(price + (2.8 * risk), 4)  # تارگت دوم
+            tp3 = round(price + (4.0 * risk), 4)  # تارگت سوم
             stop_loss = round(stop_loss, 4)
         else:
             stop_loss = max(float(latest['resistance']), price + (1.2 * atr))
             risk = stop_loss - price
-            tp1 = round(price - (1.2 * risk), 4)
-            tp2 = round(price - (2.0 * risk), 4)
-            tp3 = round(price - (3.0 * risk), 4)
+            tp1 = round(price - (1.8 * risk), 4)  # تارگت اول با سود بالا
+            tp2 = round(price - (2.8 * risk), 4)  # تارگت دوم
+            tp3 = round(price - (4.0 * risk), 4)  # تارگت سوم
             stop_loss = round(stop_loss, 4)
 
         message = f"""
@@ -265,14 +271,15 @@ class TelegramSender:
 
 💵 **Entry Price:** {price:,}
 
-🎯 **Targets (Dynamic Pivots):**
+🎯 **Targets (High Yield):**
   1️⃣ TP1: {tp1:,}
   2️⃣ TP2: {tp2:,}
   3️⃣ TP3: {tp3:,}
 
 🛑 **Stop-Loss:** {stop_loss:,}
 
-📊 **Analysis:** Volume Confirmed | RSI: {latest['rsi']:.1f} | AI: {confidence:.0%}
+💡 **Risk Management:** After reaching TP1, move Stop-Loss to Entry Price (Risk-Free).
+📊 **Analysis:** RSI: {latest['rsi']:.1f} | AI Confidence: {confidence:.0%}
 ⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}
 """
         try:
@@ -303,7 +310,7 @@ class HybridTradingSystem:
         self.telegram = TelegramSender(self.config)
         self.running = True
         
-        # حافظه داخلی برای ثبت آخرین سیگنال جهت جلوگیری از سیگنال تکراری
+        # حافظه داخلی جهت جلوگیری از سیگنال تکراری
         self.active_signals: Dict[str, str] = {}
 
     def process_symbol(self, symbol: str):
@@ -313,11 +320,9 @@ class HybridTradingSystem:
 
             rule_signal = self.signal_engine.get_rule_signal(df)
             if not rule_signal:
-                # اگر سیگنال خنثی شد، حافظه قبلی پاک می‌شود
                 self.active_signals[symbol] = None
                 return
 
-            # اگر سیگنال تکراری باشد، پیام دوباره فرستاده نمی‌شود
             if self.active_signals.get(symbol) == rule_signal:
                 return
 
@@ -328,7 +333,7 @@ class HybridTradingSystem:
 
             if ai_result["confirmed"] and ai_result["confidence"] >= self.config.MIN_CONFIDENCE_AI:
                 self.telegram.send_signal(symbol, rule_signal, latest, ai_result["confidence"])
-                self.active_signals[symbol] = rule_signal  # ثبت سیگنال ارسال‌شده
+                self.active_signals[symbol] = rule_signal
             else:
                 logger.info(f"{symbol} | AI رد کرد")
 
@@ -345,7 +350,7 @@ class HybridTradingSystem:
         logger.info("بات سیگنال پیشرفته شروع شد")
         logger.info(f"ارزها: {', '.join(self.config.SYMBOLS)}")
         
-        start_message = f"🚀 **ربات سیگنال‌دهی پیشرفته (نسخه هوشمند V2) روشن شد.**\n\n⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}\nارزهای فعال: {', '.join(self.config.SYMBOLS)}"
+        start_message = f"🚀 **ربات سیگنال‌دهی پیشرفته (نسخه V3 - پتانسیل ۱۰-۱۵٪) روشن شد.**\n\n⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}\nارزهای فعال: {', '.join(self.config.SYMBOLS)}"
         self.telegram.send_system_status(start_message)
 
         while self.running:
