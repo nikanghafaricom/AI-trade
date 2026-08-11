@@ -1,11 +1,11 @@
 # ==============================================
-# Hybrid Signal Bot - نسخه فوق پیشرفته V3 (هدف ۱۰ تا ۱۵ درصد سود ماهانه)
+# Hybrid Signal Bot - نسخه بهینه‌سازی شده (۴ تا ۱۰ سیگنال در روز)
 # ==============================================
 import os
 import time
 import logging
 import requests
-import gc  # جهت مدیریت و پاکسازی RAM
+import gc
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
@@ -15,7 +15,6 @@ import ccxt
 from openai import OpenAI
 from dotenv import load_dotenv
 
-# بارگذاری فایل .env (فقط برای محیط محلی)
 load_dotenv()
 
 # ==================== وب‌سرور استاندارد ====================
@@ -32,7 +31,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def log_message(self, format, *args):
-        return  # خاموش کردن لاگ‌های اضافه وب‌سرور
+        return
 
 def start_health_check_server():
     port = int(os.environ.get("PORT", 10000))
@@ -58,7 +57,6 @@ class Config:
     TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
     TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-    # ۱۰ ارز با نوسان و حجم عالی جهت ثبت موقعیت‌های سودده بیشتر
     SYMBOLS = [
         "BTC/USDT",
         "ETH/USDT",
@@ -73,8 +71,8 @@ class Config:
     ]
 
     TIMEFRAME = "15m"
-    CHECK_INTERVAL = 300          # هر ۵ دقیقه
-    MIN_CONFIDENCE_AI = 0.68      # حد نصاب بهینه هوش مصنوعی برای دقت و تعداد بالا
+    CHECK_INTERVAL = 300
+    MIN_CONFIDENCE_AI = 0.60      # تنظیم جهت ارسال روان‌تر سیگنال‌ها (۴ تا ۱۰ سیگنال روزانه)
 
     def validate(self):
         required = {
@@ -127,28 +125,22 @@ class AnalysisLayer:
     def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         df = df.copy()
         
-        # محاسبه سبک و بومی RSI
         delta = df['close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
         rs = gain / loss
         df['rsi'] = 100 - (100 / (1 + rs))
 
-        # محاسبه سبک EMA
         df['ema_fast'] = df['close'].ewm(span=20, adjust=False).mean()
         df['ema_slow'] = df['close'].ewm(span=50, adjust=False).mean()
 
-        # محاسبه سبک ATR
         high_low = df['high'] - df['low']
         high_close = (df['high'] - df['close'].shift()).abs()
         low_close = (df['low'] - df['close'].shift()).abs()
         tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
         df['atr'] = tr.rolling(window=14).mean()
 
-        # محاسبه حجم میانگین (Volume SMA20) برای فیلتر حجم
         df['vol_sma'] = df['volume'].rolling(window=20).mean()
-
-        # محاسبه Pivot High و Pivot Low (حمایت و مقاومت محلی ۱۰ کندل گذشته)
         df['support'] = df['low'].rolling(window=10).min()
         df['resistance'] = df['high'].rolling(window=10).max()
 
@@ -203,18 +195,16 @@ class SignalEngine:
         if pd.isna(latest['rsi']) or pd.isna(latest['ema_fast']) or pd.isna(latest['vol_sma']):
             return None
 
-        # فیلتر حجم: تأیید نقدینگی کندل جاری
-        volume_confirmed = latest['volume'] > (latest['vol_sma'] * 0.85)
+        # بهینه‌سازی ضریب حجم جهت روان‌سازی صدور سیگنال
+        volume_confirmed = latest['volume'] > (latest['vol_sma'] * 0.50)
 
         ema_bullish = latest['ema_fast'] > latest['ema_slow']
         ema_bearish = latest['ema_fast'] < latest['ema_slow']
 
-        # سیگنال خرید
         rsi_buy = (prev['rsi'] < 42 and latest['rsi'] >= 42) or (45 < latest['rsi'] < 63 and prev['rsi'] < latest['rsi'])
         if ema_bullish and rsi_buy and volume_confirmed:
             return "BUY"
 
-        # سیگنال فروش
         rsi_sell = (prev['rsi'] > 58 and latest['rsi'] <= 58) or (37 < latest['rsi'] < 55 and prev['rsi'] > latest['rsi'])
         if ema_bearish and rsi_sell and volume_confirmed:
             return "SELL"
@@ -247,20 +237,19 @@ class TelegramSender:
         price = float(latest['close'])
         atr = float(latest['atr']) if not pd.isna(latest['atr']) else price * 0.01
 
-        # محاسبه اهداف سود بسیار بهینه (بدون تغییر و افزایش حد زیان)
         if side == "BUY":
             stop_loss = min(float(latest['support']), price - (1.2 * atr))
             risk = price - stop_loss
-            tp1 = round(price + (1.8 * risk), 4)  # تارگت اول با سود بالا
-            tp2 = round(price + (2.8 * risk), 4)  # تارگت دوم
-            tp3 = round(price + (4.0 * risk), 4)  # تارگت سوم
+            tp1 = round(price + (1.8 * risk), 4)
+            tp2 = round(price + (2.8 * risk), 4)
+            tp3 = round(price + (4.0 * risk), 4)
             stop_loss = round(stop_loss, 4)
         else:
             stop_loss = max(float(latest['resistance']), price + (1.2 * atr))
             risk = stop_loss - price
-            tp1 = round(price - (1.8 * risk), 4)  # تارگت اول با سود بالا
-            tp2 = round(price - (2.8 * risk), 4)  # تارگت دوم
-            tp3 = round(price - (4.0 * risk), 4)  # تارگت سوم
+            tp1 = round(price - (1.8 * risk), 4)
+            tp2 = round(price - (2.8 * risk), 4)
+            tp3 = round(price - (4.0 * risk), 4)
             stop_loss = round(stop_loss, 4)
 
         message = f"""
@@ -309,8 +298,6 @@ class HybridTradingSystem:
         self.signal_engine = SignalEngine(self.config)
         self.telegram = TelegramSender(self.config)
         self.running = True
-        
-        # حافظه داخلی جهت جلوگیری از سیگنال تکراری
         self.active_signals: Dict[str, str] = {}
 
     def process_symbol(self, symbol: str):
@@ -327,7 +314,7 @@ class HybridTradingSystem:
                 return
 
             latest = df.iloc[-1]
-            logger.info(f"{symbol} | قانون گفت: {rule_signal} → در حال تأیید پیشرفته با AI...")
+            logger.info(f"{symbol} | قانون گفت: {rule_signal} → در حال بررسی با AI...")
 
             ai_result = self.analysis.get_ai_confirmation(symbol, rule_signal, df)
 
@@ -350,7 +337,7 @@ class HybridTradingSystem:
         logger.info("بات سیگنال پیشرفته شروع شد")
         logger.info(f"ارزها: {', '.join(self.config.SYMBOLS)}")
         
-        start_message = f"🚀 **ربات سیگنال‌دهی پیشرفته (نسخه V3 - پتانسیل ۱۰-۱۵٪) روشن شد.**\n\n⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}\nارزهای فعال: {', '.join(self.config.SYMBOLS)}"
+        start_message = f"🚀 **ربات سیگنال‌دهی پیشرفته (نسخه روان‌شده V3.1) روشن شد.**\n\n⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}\nارزهای فعال: {', '.join(self.config.SYMBOLS)}"
         self.telegram.send_system_status(start_message)
 
         while self.running:
@@ -362,7 +349,6 @@ class HybridTradingSystem:
         self.running = False
         logger.info("بات متوقف شد")
 
-# ==================== اجرا ====================
 if __name__ == "__main__":
     bot = HybridTradingSystem()
     try:
