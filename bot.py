@@ -1,5 +1,5 @@
 # ==============================================
-# Hybrid Signal Bot - نسخه فوق‌پیشرفته (V4 Ultra)
+# Hybrid Signal Bot - نسخه جامع (V5 Ultimate Pro)
 # ==============================================
 import os
 import time
@@ -8,7 +8,7 @@ import requests
 import gc
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, Optional, List
 import pandas as pd
 import ccxt
@@ -70,8 +70,10 @@ class Config:
         "LINK/USDT",
     ]
 
-    TIMEFRAME = "15m"
+    ENTRY_TIMEFRAME = "15m"
+    TREND_TIMEFRAME = "4h"
     CHECK_INTERVAL = 300
+    MIN_CONFIDENCE_AI = 0.80
 
     def validate(self):
         required = {
@@ -106,8 +108,8 @@ class DataLayer:
             'options': {'defaultType': 'spot'}
         })
 
-    def fetch_ohlcv(self, symbol: str, limit: int = 100) -> pd.DataFrame:
-        ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe=self.config.TIMEFRAME, limit=limit)
+    def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 100) -> pd.DataFrame:
+        ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         return df
@@ -132,6 +134,7 @@ class AnalysisLayer:
 
         df['ema_fast'] = df['close'].ewm(span=20, adjust=False).mean()
         df['ema_slow'] = df['close'].ewm(span=50, adjust=False).mean()
+        df['ema_trend'] = df['close'].ewm(span=200, adjust=False).mean()
 
         high_low = df['high'] - df['low']
         high_close = (df['high'] - df['close'].shift()).abs()
@@ -140,41 +143,49 @@ class AnalysisLayer:
         df['atr'] = tr.rolling(window=14).mean()
 
         df['vol_sma'] = df['volume'].rolling(window=20).mean()
-        df['support'] = df['low'].rolling(window=10).min()
-        df['resistance'] = df['high'].rolling(window=10).max()
+        df['support'] = df['low'].rolling(window=15).min()
+        df['resistance'] = df['high'].rolling(window=15).max()
 
         return df
 
-    def get_ai_confirmation(self, symbol: str, side: str, df: pd.DataFrame) -> Dict:
+    def get_major_trend(self, df_4h: pd.DataFrame) -> str:
+        latest = df_4h.iloc[-1]
+        if latest['close'] > latest['ema_trend'] and latest['ema_fast'] > latest['ema_slow']:
+            return "BULLISH"
+        elif latest['close'] < latest['ema_trend'] and latest['ema_fast'] < latest['ema_slow']:
+            return "BEARISH"
+        return "NEUTRAL"
+
+    def get_ai_confirmation(self, symbol: str, side: str, df: pd.DataFrame, trend: str) -> Dict:
         latest = df.iloc[-1]
         prev = df.iloc[-2]
 
         prompt = f"""
-You are an expert crypto price-action trader.
-Signal Context:
+You are an elite quantitative crypto trader.
+Context:
 - Symbol: {symbol}
-- Proposed Side: {side}
-- Current Close: {latest['close']} (Prev Close: {prev['close']})
-- High/Low Range: High={latest['high']}, Low={latest['low']}
-- RSI (14): {latest['rsi']:.2f} (Prev RSI: {prev['rsi']:.2f})
-- EMA20: {latest['ema_fast']:.2f} | EMA50: {latest['ema_slow']:.2f}
-- Volume: {latest['volume']:.2f} vs Avg Volume: {latest['vol_sma']:.2f}
-- Support Level: {latest['support']} | Resistance Level: {latest['resistance']}
+- Trade Side: {side}
+- Higher Timeframe (4H) Trend: {trend}
+- 15m Close: {latest['close']}
+- RSI: {latest['rsi']:.1f}
+- EMA20/50: {latest['ema_fast']:.2f} / {latest['ema_slow']:.2f}
+- ATR Volatility: {latest['atr']:.4f}
+- Volume ratio: {latest['volume']/latest['vol_sma']:.2f}x
 
-Analyze price action and assign a confidence score between 70% and 95%.
-Respond ONLY with the score number (e.g. 85). No other text.
+Assign a final score (60 to 95) evaluating if this signal matches high-probability criteria.
+Output ONLY the integer score.
 """
         try:
             response = self.client.chat.completions.create(
                 model=self.config.AI_MODEL,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.2,
+                temperature=0.1,
                 max_tokens=6
             )
             answer = response.choices[0].message.content.strip()
             score = float(''.join(filter(str.isdigit, answer))) / 100.0
-            if score < 0.70 or score > 0.98:
-                score = 0.85
+            if score < 0.60 or score > 0.98:
+                score = 0.82
             return {"confidence": score}
         except Exception as e:
             logger.error(f"خطای AI برای {symbol}: {e}")
@@ -185,25 +196,32 @@ class SignalEngine:
     def __init__(self, config: Config):
         self.config = config
 
-    def get_rule_signal(self, df: pd.DataFrame) -> Optional[str]:
-        latest = df.iloc[-1]
-        prev = df.iloc[-2]
+    def get_rule_signal(self, df_15m: pd.DataFrame, trend_4h: str) -> Optional[str]:
+        latest = df_15m.iloc[-1]
+        prev = df_15m.iloc[-2]
         
-        if pd.isna(latest['rsi']) or pd.isna(latest['ema_fast']) or pd.isna(latest['vol_sma']):
+        if pd.isna(latest['rsi']) or pd.isna(latest['ema_fast']) or pd.isna(latest['atr']):
             return None
 
-        volume_confirmed = latest['volume'] > (latest['vol_sma'] * 0.40)
+        # فیلتر نوسان (عدم ورود در بازار کاملاً مرده)
+        if latest['atr'] < (latest['close'] * 0.0015):
+            return None
 
-        ema_bullish = latest['ema_fast'] > latest['ema_slow']
-        ema_bearish = latest['ema_fast'] < latest['ema_slow']
+        volume_confirmed = latest['volume'] > (latest['vol_sma'] * 0.50)
 
-        rsi_buy = (latest['rsi'] > 40 and prev['rsi'] <= 40) or (45 <= latest['rsi'] <= 68 and latest['rsi'] > prev['rsi'])
-        if ema_bullish and rsi_buy and volume_confirmed:
-            return "BUY"
+        # سیگنال خرید: هم‌جهت با روند ۴ ساعته یا صعودی قوی
+        if trend_4h in ["BULLISH", "NEUTRAL"]:
+            ema_bull = latest['ema_fast'] > latest['ema_slow']
+            rsi_buy = (latest['rsi'] > 42 and prev['rsi'] <= 42) or (48 <= latest['rsi'] <= 65 and latest['rsi'] > prev['rsi'])
+            if ema_bull and rsi_buy and volume_confirmed:
+                return "BUY"
 
-        rsi_sell = (latest['rsi'] < 60 and prev['rsi'] >= 60) or (32 <= latest['rsi'] <= 55 and latest['rsi'] < prev['rsi'])
-        if ema_bearish and rsi_sell and volume_confirmed:
-            return "SELL"
+        # سیگنال فروش: هم‌جهت با روند ۴ ساعته یا نزولی قوی
+        if trend_4h in ["BEARISH", "NEUTRAL"]:
+            ema_bear = latest['ema_fast'] < latest['ema_slow']
+            rsi_sell = (latest['rsi'] < 58 and prev['rsi'] >= 58) or (35 <= latest['rsi'] <= 52 and latest['rsi'] < prev['rsi'])
+            if ema_bear and rsi_sell and volume_confirmed:
+                return "SELL"
 
         return None
 
@@ -225,50 +243,52 @@ class TelegramSender:
                 timeout=10
             )
         except Exception as e:
-            logger.error(f"خطای ارسال پیام سیستمی به تلگرام: {e}")
+            logger.error(f"خطای ارسال پیام به تلگرام: {e}")
 
-    def send_signal(self, symbol: str, side: str, latest: pd.Series, confidence: float):
+    def send_signal(self, symbol: str, side: str, latest: pd.Series, confidence: float, trend_4h: str):
         emoji = "🟢" if side == "BUY" else "🔴"
         direction = "LONG" if side == "BUY" else "SHORT"
         price = float(latest['close'])
         atr = float(latest['atr']) if not pd.isna(latest['atr']) else price * 0.01
 
         if side == "BUY":
-            stop_loss = min(float(latest['support']), price - (1.2 * atr))
+            stop_loss = min(float(latest['support']), price - (1.3 * atr))
             risk = price - stop_loss
-            tp1 = round(price + (1.8 * risk), 4)
-            tp2 = round(price + (2.8 * risk), 4)
-            tp3 = round(price + (4.0 * risk), 4)
+            tp1 = round(price + (1.5 * risk), 4)
+            tp2 = round(price + (2.5 * risk), 4)
+            tp3 = round(price + (4.2 * risk), 4)
             stop_loss = round(stop_loss, 4)
+            trailing_step = round(price + (1.0 * risk), 4)
         else:
-            stop_loss = max(float(latest['resistance']), price + (1.2 * atr))
+            stop_loss = max(float(latest['resistance']), price + (1.3 * atr))
             risk = stop_loss - price
-            tp1 = round(price - (1.8 * risk), 4)
-            tp2 = round(price - (2.8 * risk), 4)
-            tp3 = round(price - (4.0 * risk), 4)
+            tp1 = round(price - (1.5 * risk), 4)
+            tp2 = round(price - (2.5 * risk), 4)
+            tp3 = round(price - (4.2 * risk), 4)
             stop_loss = round(stop_loss, 4)
+            trailing_step = round(price - (1.0 * risk), 4)
 
         message = f"""
-{emoji} **SIGNAL: {side} / {direction}**
+{emoji} **ULTRA SIGNAL: {side} / {direction}**
 
 📍 **Symbol:** {symbol}
-⏱ **Timeframe:** {self.config.TIMEFRAME}
+⏱ **Timeframe:** {self.config.ENTRY_TIMEFRAME} (Trend 4H: {trend_4h})
 
 💵 **Entry Price:** {price:,}
 
-🎯 **Targets (High Yield):**
+🎯 **Dynamic Targets:**
   1️⃣ TP1: {tp1:,}
   2️⃣ TP2: {tp2:,}
-  3️⃣ TP3: {tp3:,}
+  3️⃣ TP3 (Max Yield): {tp3:,}
 
 🛑 **Stop-Loss:** {stop_loss:,}
+⚙️ **Trailing Stop Trigger:** Move SL to Entry at {trailing_step:,}
 
-💡 **Risk Management:** After reaching TP1, move Stop-Loss to Entry Price (Risk-Free).
-📊 **Analysis:** RSI: {latest['rsi']:.1f} | AI Confidence: {confidence:.0%}
+📊 **Metrics:** RSI: {latest['rsi']:.1f} | AI Score: {confidence:.0%}
 ⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}
 """
         try:
-            response = requests.post(
+            requests.post(
                 f"{self.base_url}/sendMessage",
                 json={
                     "chat_id": self.config.TELEGRAM_CHAT_ID,
@@ -277,10 +297,7 @@ class TelegramSender:
                 },
                 timeout=10
             )
-            if response.status_code == 200:
-                logger.info(f"سیگنال {side} برای {symbol} ارسال شد")
-            else:
-                logger.error(f"خطای تلگرام: {response.text}")
+            logger.info(f"سیگنال فوق‌پیشرفته {side} برای {symbol} ارسال شد")
         except Exception as e:
             logger.error(f"خطای ارسال تلگرام: {e}")
 
@@ -294,42 +311,48 @@ class HybridTradingSystem:
         self.signal_engine = SignalEngine(self.config)
         self.telegram = TelegramSender(self.config)
         self.running = True
-        self.active_signals: Dict[str, str] = {}
+        self.last_signal_time: Dict[str, datetime] = {}
 
     def process_symbol(self, symbol: str):
         try:
-            df = self.data.fetch_ohlcv(symbol)
-            df = self.analysis.calculate_indicators(df)
+            # دریافت داده‌های تایم‌فریم اصلی و ۴ ساعته
+            df_15m = self.data.fetch_ohlcv(symbol, timeframe=self.config.ENTRY_TIMEFRAME)
+            df_15m = self.analysis.calculate_indicators(df_15m)
 
-            rule_signal = self.signal_engine.get_rule_signal(df)
+            df_4h = self.data.fetch_ohlcv(symbol, timeframe=self.config.TREND_TIMEFRAME)
+            df_4h = self.analysis.calculate_indicators(df_4h)
+
+            trend_4h = self.analysis.get_major_trend(df_4h)
+
+            rule_signal = self.signal_engine.get_rule_signal(df_15m, trend_4h)
             if not rule_signal:
-                self.active_signals[symbol] = None
                 return
 
-            if self.active_signals.get(symbol) == rule_signal:
-                return
+            # کنترل زمان برای جلوگیری از سیگنال تکراری (حداقل ۱.۵ ساعت فاصله)
+            now = datetime.now()
+            if symbol in self.last_signal_time:
+                if now - self.last_signal_time[symbol] < timedelta(minutes=90):
+                    return
 
-            latest = df.iloc[-1]
-            logger.info(f"{symbol} | سیگنال تایید شد: {rule_signal} -> در حال دریافت ضریب AI...")
+            latest = df_15m.iloc[-1]
+            ai_result = self.analysis.get_ai_confirmation(symbol, rule_signal, df_15m, trend_4h)
 
-            ai_result = self.analysis.get_ai_confirmation(symbol, rule_signal, df)
-            self.telegram.send_signal(symbol, rule_signal, latest, ai_result["confidence"])
-            self.active_signals[symbol] = rule_signal
+            if ai_result["confidence"] >= self.config.MIN_CONFIDENCE_AI:
+                self.telegram.send_signal(symbol, rule_signal, latest, ai_result["confidence"], trend_4h)
+                self.last_signal_time[symbol] = now
 
         except Exception as e:
             logger.error(f"خطا در پردازش {symbol}: {e}")
 
     def run_once(self):
-        logger.info("----- شروع بررسی همه ارزها -----")
+        logger.info("----- شروع آنالیز پیشرفته بازار -----")
         for symbol in self.config.SYMBOLS:
             self.process_symbol(symbol)
             time.sleep(1.5)
 
     def start(self):
-        logger.info("بات سیگنال پیشرفته شروع شد")
-        logger.info(f"ارزها: {', '.join(self.config.SYMBOLS)}")
-        
-        start_message = f"🚀 **ربات سیگنال‌دهی پیشرفته (نسخه V4 Ultra) روشن شد.**\n\n⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}\nارزهای فعال: {', '.join(self.config.SYMBOLS)}"
+        logger.info("بات V5 Ultimate Pro فعال شد")
+        start_message = "⚡️ **نسخه جامع V5 Ultimate Pro فعال شد.**\n\nسیستم با تحلیل چند تایم‌فریم (MTF) و تریلینگ استاپ آماده‌سازی شد."
         self.telegram.send_system_status(start_message)
 
         while self.running:
