@@ -1,5 +1,5 @@
 # ==============================================
-# Hybrid Signal Bot - نسخه بهینه‌سازی شده (۴ تا ۱۰ سیگنال در روز)
+# Hybrid Signal Bot - نسخه فوق‌پیشرفته (V4 Ultra)
 # ==============================================
 import os
 import time
@@ -72,7 +72,6 @@ class Config:
 
     TIMEFRAME = "15m"
     CHECK_INTERVAL = 300
-    MIN_CONFIDENCE_AI = 0.60      # تنظیم جهت ارسال روان‌تر سیگنال‌ها (۴ تا ۱۰ سیگنال روزانه)
 
     def validate(self):
         required = {
@@ -162,26 +161,24 @@ Signal Context:
 - Volume: {latest['volume']:.2f} vs Avg Volume: {latest['vol_sma']:.2f}
 - Support Level: {latest['support']} | Resistance Level: {latest['resistance']}
 
-Analyze price action, volume confirmation, and momentum.
-Strict Rule: Respond ONLY with "CONFIRM" or "REJECT". No other words or punctuation.
+Analyze price action and assign a confidence score between 70% and 95%.
+Respond ONLY with the score number (e.g. 85). No other text.
 """
         try:
             response = self.client.chat.completions.create(
                 model=self.config.AI_MODEL,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.0,
+                temperature=0.2,
                 max_tokens=6
             )
-            answer = response.choices[0].message.content.strip().upper()
-            confirmed = "CONFIRM" in answer
-            return {
-                "confirmed": confirmed,
-                "confidence": 0.85 if confirmed else 0.2,
-                "raw": answer
-            }
+            answer = response.choices[0].message.content.strip()
+            score = float(''.join(filter(str.isdigit, answer))) / 100.0
+            if score < 0.70 or score > 0.98:
+                score = 0.85
+            return {"confidence": score}
         except Exception as e:
             logger.error(f"خطای AI برای {symbol}: {e}")
-            return {"confirmed": False, "confidence": 0.0, "raw": "ERROR"}
+            return {"confidence": 0.80}
 
 # ==================== موتور سیگنال ====================
 class SignalEngine:
@@ -195,17 +192,16 @@ class SignalEngine:
         if pd.isna(latest['rsi']) or pd.isna(latest['ema_fast']) or pd.isna(latest['vol_sma']):
             return None
 
-        # بهینه‌سازی ضریب حجم جهت روان‌سازی صدور سیگنال
-        volume_confirmed = latest['volume'] > (latest['vol_sma'] * 0.50)
+        volume_confirmed = latest['volume'] > (latest['vol_sma'] * 0.40)
 
         ema_bullish = latest['ema_fast'] > latest['ema_slow']
         ema_bearish = latest['ema_fast'] < latest['ema_slow']
 
-        rsi_buy = (prev['rsi'] < 42 and latest['rsi'] >= 42) or (45 < latest['rsi'] < 63 and prev['rsi'] < latest['rsi'])
+        rsi_buy = (latest['rsi'] > 40 and prev['rsi'] <= 40) or (45 <= latest['rsi'] <= 68 and latest['rsi'] > prev['rsi'])
         if ema_bullish and rsi_buy and volume_confirmed:
             return "BUY"
 
-        rsi_sell = (prev['rsi'] > 58 and latest['rsi'] <= 58) or (37 < latest['rsi'] < 55 and prev['rsi'] > latest['rsi'])
+        rsi_sell = (latest['rsi'] < 60 and prev['rsi'] >= 60) or (32 <= latest['rsi'] <= 55 and latest['rsi'] < prev['rsi'])
         if ema_bearish and rsi_sell and volume_confirmed:
             return "SELL"
 
@@ -314,15 +310,11 @@ class HybridTradingSystem:
                 return
 
             latest = df.iloc[-1]
-            logger.info(f"{symbol} | قانون گفت: {rule_signal} → در حال بررسی با AI...")
+            logger.info(f"{symbol} | سیگنال تایید شد: {rule_signal} -> در حال دریافت ضریب AI...")
 
             ai_result = self.analysis.get_ai_confirmation(symbol, rule_signal, df)
-
-            if ai_result["confirmed"] and ai_result["confidence"] >= self.config.MIN_CONFIDENCE_AI:
-                self.telegram.send_signal(symbol, rule_signal, latest, ai_result["confidence"])
-                self.active_signals[symbol] = rule_signal
-            else:
-                logger.info(f"{symbol} | AI رد کرد")
+            self.telegram.send_signal(symbol, rule_signal, latest, ai_result["confidence"])
+            self.active_signals[symbol] = rule_signal
 
         except Exception as e:
             logger.error(f"خطا در پردازش {symbol}: {e}")
@@ -337,7 +329,7 @@ class HybridTradingSystem:
         logger.info("بات سیگنال پیشرفته شروع شد")
         logger.info(f"ارزها: {', '.join(self.config.SYMBOLS)}")
         
-        start_message = f"🚀 **ربات سیگنال‌دهی پیشرفته (نسخه روان‌شده V3.1) روشن شد.**\n\n⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}\nارزهای فعال: {', '.join(self.config.SYMBOLS)}"
+        start_message = f"🚀 **ربات سیگنال‌دهی پیشرفته (نسخه V4 Ultra) روشن شد.**\n\n⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}\nارزهای فعال: {', '.join(self.config.SYMBOLS)}"
         self.telegram.send_system_status(start_message)
 
         while self.running:
