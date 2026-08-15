@@ -57,7 +57,7 @@ class Config:
 
     TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
     TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-    PERSONAL_CHAT_ID = os.getenv("PERSONAL_CHAT_ID") # آیدی شخصی برای معامله مجازی
+    PERSONAL_CHAT_ID = os.getenv("PERSONAL_CHAT_ID")
 
     SYMBOLS = [
         "BTC/USDT",
@@ -270,30 +270,34 @@ class PaperTrader:
                 side = trade['side']
                 entry = trade['entry']
 
-                # بررسی پوزیشن خرید (BUY)
+                # ----------------- بررسی پوزیشن خرید (BUY) -----------------
                 if side == "BUY":
+                    # ۱. حد زیان
                     if latest_low <= trade['sl']:
                         pnl = ((trade['sl'] - entry) / entry) * 100
                         self._send_close_report(trade, pnl)
                         del self.active_trades[trade_id]
                         continue
 
-                    if latest_high >= trade['tp3']:
-                        pnl = ((trade['tp3'] - entry) / entry) * 100
+                    # ۲. رسیدن به تارگت اول (خروج با سود)
+                    elif latest_high >= trade['tp1']:
+                        pnl = ((trade['tp1'] - entry) / entry) * 100
                         self._send_close_report(trade, pnl)
                         del self.active_trades[trade_id]
                         continue
 
-                # بررسی پوزیشن فروش (SELL)
+                # ----------------- بررسی پوزیشن فروش (SELL) -----------------
                 elif side == "SELL":
+                    # ۱. حد زیان
                     if latest_high >= trade['sl']:
                         pnl = ((entry - trade['sl']) / entry) * 100
                         self._send_close_report(trade, pnl)
                         del self.active_trades[trade_id]
                         continue
 
-                    if latest_low <= trade['tp3']:
-                        pnl = ((entry - trade['tp3']) / entry) * 100
+                    # ۲. رسیدن به تارگت اول (خروج با سود)
+                    elif latest_low <= trade['tp1']:
+                        pnl = ((entry - trade['tp1']) / entry) * 100
                         self._send_close_report(trade, pnl)
                         del self.active_trades[trade_id]
                         continue
@@ -311,7 +315,6 @@ class PaperTrader:
 📌 **ارز:** {trade['symbol']} ({trade['side']})
 📈 **سود/زیان:** {pnl:+.2f}%
 """
-        # ارسال پیام اختصاصی فقط به آیدی شخصی
         self.telegram.send_personal_message(msg)
 
 # ==================== ارسال تلگرام ====================
@@ -335,7 +338,6 @@ class TelegramSender:
             logger.error(f"خطای ارسال پیام به تلگرام: {e}")
 
     def send_personal_message(self, text: str):
-        """ارسال گزارش معامله مجازی به آیدی شخصی"""
         target_id = self.config.PERSONAL_CHAT_ID or self.config.TELEGRAM_CHAT_ID
         try:
             requests.post(
@@ -404,7 +406,6 @@ class TelegramSender:
             )
             logger.info(f"سیگنال فوق‌پیشرفته {side} برای {symbol} ارسال شد")
             
-            # بازگرداندن مقادیر برای ثبت در معامله مجازی
             return {
                 "price": price,
                 "tp1": tp1,
@@ -454,7 +455,6 @@ class HybridTradingSystem:
             if ai_result["confidence"] >= self.config.MIN_CONFIDENCE_AI:
                 trade_data = self.telegram.send_signal(symbol, rule_signal, latest, ai_result["confidence"], trend_4h)
                 
-                # باز کردن معامله مجازی جدید
                 if trade_data:
                     self.paper_trader.open_virtual_trade(
                         symbol=symbol,
@@ -477,7 +477,6 @@ class HybridTradingSystem:
             self.process_symbol(symbol)
             time.sleep(1.5)
             
-        # پایش معاملات مجازی باز در انتهای هر دور آنالیز
         self.paper_trader.update_and_check_trades(self.data)
 
     def start(self):
