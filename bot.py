@@ -6,6 +6,7 @@ import time
 import logging
 import requests
 import gc
+import json
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timedelta
@@ -56,6 +57,7 @@ class Config:
 
     TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
     TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+    PERSONAL_CHAT_ID = os.getenv("PERSONAL_CHAT_ID") # آیدی شخصی برای معامله مجازی
 
     SYMBOLS = [
         "BTC/USDT",
@@ -203,20 +205,17 @@ class SignalEngine:
         if pd.isna(latest['rsi']) or pd.isna(latest['ema_fast']) or pd.isna(latest['atr']):
             return None
 
-        # فیلتر نوسان (عدم ورود در بازار کاملاً مرده)
         if latest['atr'] < (latest['close'] * 0.0015):
             return None
 
         volume_confirmed = latest['volume'] > (latest['vol_sma'] * 0.50)
 
-        # سیگنال خرید: هم‌جهت با روند ۴ ساعته یا صعودی قوی
         if trend_4h in ["BULLISH", "NEUTRAL"]:
             ema_bull = latest['ema_fast'] > latest['ema_slow']
             rsi_buy = (latest['rsi'] > 42 and prev['rsi'] <= 42) or (48 <= latest['rsi'] <= 65 and latest['rsi'] > prev['rsi'])
             if ema_bull and rsi_buy and volume_confirmed:
                 return "BUY"
 
-        # سیگنال فروش: هم‌جهت با روند ۴ ساعته یا نزولی قوی
         if trend_4h in ["BEARISH", "NEUTRAL"]:
             ema_bear = latest['ema_fast'] < latest['ema_slow']
             rsi_sell = (latest['rsi'] < 58 and prev['rsi'] >= 58) or (35 <= latest['rsi'] <= 52 and latest['rsi'] < prev['rsi'])
@@ -224,6 +223,96 @@ class SignalEngine:
                 return "SELL"
 
         return None
+
+# ==================== ماژول معامله مجازی (Paper Trading) ====================
+class PaperTrader:
+    def __init__(self, config: Config, telegram_sender):
+        self.config = config
+        self.telegram = telegram_sender
+        self.file_path = "paper_trades.json"
+        self.active_trades = self._load_trades()
+
+    def _load_trades(self) -> Dict:
+        if os.path.exists(self.file_path):
+            try:
+                with open(self.file_path, "r") as f:
+                    return json.load(f)
+            except Exception:
+                return {}
+        return {}
+
+    def _save_trades(self):
+        with open(self.file_path, "w") as f:
+            json.dump(self.active_trades, f, indent=4)
+
+    def open_virtual_trade(self, symbol: str, side: str, entry_price: float, tp1: float, tp2: float, tp3: float, sl: float):
+        trade_id = f"{symbol}_{int(time.time())}"
+        self.active_trades[trade_id] = {
+            "symbol": symbol,
+            "side": side,
+            "entry": entry_price,
+            "tp1": tp1,
+            "tp2": tp2,
+            "tp3": tp3,
+            "sl": sl,
+            "open_time": datetime.now().strftime('%Y-%m-%d %H:%M')
+        }
+        self._save_trades()
+
+    def update_and_check_trades(self, data_layer: DataLayer):
+        for trade_id, trade in list(self.active_trades.items()):
+            try:
+                df = data_layer.fetch_ohlcv(trade['symbol'], timeframe="1m", limit=5)
+                latest_high = float(df['high'].max())
+                latest_low = float(df['low'].min())
+
+                symbol = trade['symbol']
+                side = trade['side']
+                entry = trade['entry']
+
+                # بررسی پوزیشن خرید (BUY)
+                if side == "BUY":
+                    if latest_low <= trade['sl']:
+                        pnl = ((trade['sl'] - entry) / entry) * 100
+                        self._send_close_report(trade, pnl)
+                        del self.active_trades[trade_id]
+                        continue
+
+                    if latest_high >= trade['tp3']:
+                        pnl = ((trade['tp3'] - entry) / entry) * 100
+                        self._send_close_report(trade, pnl)
+                        del self.active_trades[trade_id]
+                        continue
+
+                # بررسی پوزیشن فروش (SELL)
+                elif side == "SELL":
+                    if latest_high >= trade['sl']:
+                        pnl = ((entry - trade['sl']) / entry) * 100
+                        self._send_close_report(trade, pnl)
+                        del self.active_trades[trade_id]
+                        continue
+
+                    if latest_low <= trade['tp3']:
+                        pnl = ((entry - trade['tp3']) / entry) * 100
+                        self._send_close_report(trade, pnl)
+                        del self.active_trades[trade_id]
+                        continue
+
+            except Exception as e:
+                logger.error(f"خطا در بروزرسانی معامله مجازی {trade_id}: {e}")
+
+        self._save_trades()
+
+    def _send_close_report(self, trade: Dict, pnl: float):
+        emoji = "✅" if pnl > 0 else "❌"
+        msg = f"""
+{emoji} **معامله بسته شد**
+
+📌 **ارز:** {trade['symbol']} ({trade['side']})
+📈 **سود/زیان:** {pnl:+.2f}%
+"""
+        # ارسال پیام اختصاصی فقط به آیدی شخصی
+        self.telegram.send_personal_message(msg)
 
 # ==================== ارسال تلگرام ====================
 class TelegramSender:
@@ -245,7 +334,23 @@ class TelegramSender:
         except Exception as e:
             logger.error(f"خطای ارسال پیام به تلگرام: {e}")
 
-    def send_signal(self, symbol: str, side: str, latest: pd.Series, confidence: float, trend_4h: str):
+    def send_personal_message(self, text: str):
+        """ارسال گزارش معامله مجازی به آیدی شخصی"""
+        target_id = self.config.PERSONAL_CHAT_ID or self.config.TELEGRAM_CHAT_ID
+        try:
+            requests.post(
+                f"{self.base_url}/sendMessage",
+                json={
+                    "chat_id": target_id,
+                    "text": text,
+                    "parse_mode": "Markdown"
+                },
+                timeout=10
+            )
+        except Exception as e:
+            logger.error(f"خطای ارسال پیام شخصی به تلگرام: {e}")
+
+    def send_signal(self, symbol: str, side: str, latest: pd.Series, confidence: float, trend_4h: str) -> Dict:
         emoji = "🟢" if side == "BUY" else "🔴"
         direction = "LONG" if side == "BUY" else "SHORT"
         price = float(latest['close'])
@@ -298,8 +403,18 @@ class TelegramSender:
                 timeout=10
             )
             logger.info(f"سیگنال فوق‌پیشرفته {side} برای {symbol} ارسال شد")
+            
+            # بازگرداندن مقادیر برای ثبت در معامله مجازی
+            return {
+                "price": price,
+                "tp1": tp1,
+                "tp2": tp2,
+                "tp3": tp3,
+                "sl": stop_loss
+            }
         except Exception as e:
             logger.error(f"خطای ارسال تلگرام: {e}")
+            return None
 
 # ==================== سیستم اصلی ====================
 class HybridTradingSystem:
@@ -310,12 +425,12 @@ class HybridTradingSystem:
         self.analysis = AnalysisLayer(self.config)
         self.signal_engine = SignalEngine(self.config)
         self.telegram = TelegramSender(self.config)
+        self.paper_trader = PaperTrader(self.config, self.telegram)
         self.running = True
         self.last_signal_time: Dict[str, datetime] = {}
 
     def process_symbol(self, symbol: str):
         try:
-            # دریافت داده‌های تایم‌فریم اصلی و ۴ ساعته
             df_15m = self.data.fetch_ohlcv(symbol, timeframe=self.config.ENTRY_TIMEFRAME)
             df_15m = self.analysis.calculate_indicators(df_15m)
 
@@ -328,7 +443,6 @@ class HybridTradingSystem:
             if not rule_signal:
                 return
 
-            # کنترل زمان برای جلوگیری از سیگنال تکراری (حداقل ۱.۵ ساعت فاصله)
             now = datetime.now()
             if symbol in self.last_signal_time:
                 if now - self.last_signal_time[symbol] < timedelta(minutes=90):
@@ -338,7 +452,20 @@ class HybridTradingSystem:
             ai_result = self.analysis.get_ai_confirmation(symbol, rule_signal, df_15m, trend_4h)
 
             if ai_result["confidence"] >= self.config.MIN_CONFIDENCE_AI:
-                self.telegram.send_signal(symbol, rule_signal, latest, ai_result["confidence"], trend_4h)
+                trade_data = self.telegram.send_signal(symbol, rule_signal, latest, ai_result["confidence"], trend_4h)
+                
+                # باز کردن معامله مجازی جدید
+                if trade_data:
+                    self.paper_trader.open_virtual_trade(
+                        symbol=symbol,
+                        side=rule_signal,
+                        entry_price=trade_data["price"],
+                        tp1=trade_data["tp1"],
+                        tp2=trade_data["tp2"],
+                        tp3=trade_data["tp3"],
+                        sl=trade_data["sl"]
+                    )
+
                 self.last_signal_time[symbol] = now
 
         except Exception as e:
@@ -349,6 +476,9 @@ class HybridTradingSystem:
         for symbol in self.config.SYMBOLS:
             self.process_symbol(symbol)
             time.sleep(1.5)
+            
+        # پایش معاملات مجازی باز در انتهای هر دور آنالیز
+        self.paper_trader.update_and_check_trades(self.data)
 
     def start(self):
         logger.info("بات V5 Ultimate Pro فعال شد")
