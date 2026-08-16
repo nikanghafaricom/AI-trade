@@ -1,5 +1,5 @@
 # ==============================================
-# Hybrid Signal Bot V5.2 - Optimized & Core Preserved
+# Hybrid Signal Bot V6 - Max Yield & Ultra Pure (No-FastAPI)
 # ==============================================
 import os
 import time
@@ -7,17 +7,12 @@ import logging
 import requests
 import gc
 import json
-import threading
 from datetime import datetime, timedelta
 from typing import Dict, Optional, List
 import pandas as pd
 import ccxt
 from openai import OpenAI
 from dotenv import load_dotenv
-
-from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
-import uvicorn
 
 load_dotenv()
 
@@ -45,7 +40,7 @@ class Config:
     ENTRY_TIMEFRAME = "15m"
     TREND_TIMEFRAME = "4h"
     CHECK_INTERVAL = 300
-    MIN_CONFIDENCE_AI = 0.80
+    MIN_CONFIDENCE_AI = 0.82  # سخت‌گیری بیشتر برای بالابردن حد سود
 
     def validate(self):
         required = {
@@ -67,111 +62,6 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
-
-GLOBAL_PAPER_TRADER = None
-
-# ==================== وب‌اپلیکیشن داشبورد (FastAPI) ====================
-app_web = FastAPI()
-
-HTML_DASHBOARD = """
-<!DOCTYPE html>
-<html lang="fa" dir="rtl">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Trading Dashboard</title>
-    <script src="https://telegram.org/js/telegram-web-app.js"></script>
-    <style>
-        body { font-family: system-ui, sans-serif; background: #121824; color: #fff; margin: 0; padding: 15px; }
-        .card { background: #1e293b; border-radius: 12px; padding: 15px; margin-bottom: 12px; border: 1px solid #334155; }
-        .card-header { display: flex; justify-content: space-between; align-items: center; }
-        .badge-buy { background: #16a34a; padding: 4px 8px; border-radius: 6px; font-size: 12px; }
-        .badge-sell { background: #dc2626; padding: 4px 8px; border-radius: 6px; font-size: 12px; }
-        .btn { width: 100%; padding: 10px; border: none; border-radius: 8px; font-weight: bold; cursor: pointer; margin-top: 10px; }
-        .btn-danger { background: #ef4444; color: white; }
-        .input-group { margin-top: 10px; display: flex; gap: 8px; align-items: center; }
-        input { background: #0f172a; border: 1px solid #334155; color: white; padding: 8px; border-radius: 6px; width: 60px; text-align: center; }
-    </style>
-</head>
-<body>
-    <h2>📊 داشبورد لایو معاملات</h2>
-    <div id="trades-container">در حال دریافت پوزیشن‌ها...</div>
-
-    <script>
-        const tg = window.Telegram.WebApp;
-        tg.expand();
-
-        async function fetchTrades() {
-            try {
-                const res = await fetch('/api/trades');
-                const data = await res.json();
-                const container = document.getElementById('trades-container');
-                container.innerHTML = '';
-
-                if (Object.keys(data).length === 0) {
-                    container.innerHTML = '<p style="text-align:center; color:#94a3b8;">هیچ معامله باز فعال نیست.</p>';
-                    return;
-                }
-
-                for (let id in data) {
-                    let trade = data[id];
-                    let badgeClass = trade.side === 'BUY' ? 'badge-buy' : 'badge-sell';
-                    container.innerHTML += `
-                        <div class="card">
-                            <div class="card-header">
-                                <strong>${trade.symbol}</strong>
-                                <span class="${badgeClass}">${trade.side}</span>
-                            </div>
-                            <p style="margin: 8px 0; font-size: 14px;">ورود: ${trade.entry}</p>
-                            <p style="margin: 4px 0; font-size: 12px; color: #94a3b8;">تارگت: ${trade.tp1} | استاپ: ${trade.sl}</p>
-                            <div class="input-group">
-                                <label style="font-size:12px;">اهرم:</label>
-                                <input type="number" value="10" min="1" max="100">
-                                <button class="btn btn-danger" style="margin:0;" onclick="closeTrade('${id}')">بستن فوری</button>
-                            </div>
-                        </div>
-                    `;
-                }
-            } catch (e) { console.error(e); }
-        }
-
-        async function closeTrade(id) {
-            await fetch('/api/close?id=' + id, { method: 'POST' });
-            fetchTrades();
-        }
-
-        setInterval(fetchTrades, 3000);
-        fetchTrades();
-    </script>
-</body>
-</html>
-"""
-
-@app_web.get("/", response_class=HTMLResponse)
-def get_dashboard():
-    return HTML_DASHBOARD
-
-@app_web.get("/api/trades")
-def get_active_trades():
-    if GLOBAL_PAPER_TRADER:
-        return GLOBAL_PAPER_TRADER.active_trades
-    return {}
-
-@app_web.post("/api/close")
-def close_trade_manual(id: str):
-    if GLOBAL_PAPER_TRADER and id in GLOBAL_PAPER_TRADER.active_trades:
-        trade = GLOBAL_PAPER_TRADER.active_trades[id]
-        GLOBAL_PAPER_TRADER._send_close_report(trade, 0.0)
-        del GLOBAL_PAPER_TRADER.active_trades[id]
-        GLOBAL_PAPER_TRADER._save_trades()
-        return {"status": "ok"}
-    return {"status": "not_found"}
-
-def run_web_server():
-    port = int(os.environ.get("PORT", 10000))
-    uvicorn.run(app_web, host="0.0.0.0", port=port, log_level="warning")
-
-threading.Thread(target=run_web_server, daemon=True).start()
 
 # ==================== لایه داده ====================
 class DataLayer:
@@ -275,7 +165,7 @@ Output ONLY the integer score.
             return {"confidence": score}
         except Exception as e:
             logger.error(f"خطای AI برای {symbol}: {e}")
-            return {"confidence": 0.80}
+            return {"confidence": 0.82}
 
 # ==================== موتور سیگنال ====================
 class SignalEngine:
@@ -288,27 +178,28 @@ class SignalEngine:
         
         if pd.isna(latest['rsi']) or pd.isna(latest['ema_fast']) or pd.isna(latest['atr']):
             return None
-        if latest['atr'] < (latest['close'] * 0.0015):
+        
+        # حذف نوسانات شدید بازار (فیلتر کندل‌های هیجانی)
+        if latest['atr'] > (latest['close'] * 0.03) or latest['atr'] < (latest['close'] * 0.0015):
             return None
 
-        volume_confirmed = latest['volume'] > (latest['vol_sma'] * 0.50)
+        volume_confirmed = latest['volume'] > (latest['vol_sma'] * 0.60)
 
-        # عدم معامله خلاف جهت روند کل بازار (BTC)
         if (trend_4h in ["BULLISH", "NEUTRAL"]) and btc_status != "BEARISH":
             ema_bull = latest['ema_fast'] > latest['ema_slow']
-            rsi_buy = (latest['rsi'] > 42 and prev['rsi'] <= 42) or (48 <= latest['rsi'] <= 65 and latest['rsi'] > prev['rsi'])
+            rsi_buy = (latest['rsi'] > 45 and prev['rsi'] <= 45) or (50 <= latest['rsi'] <= 65 and latest['rsi'] > prev['rsi'])
             if ema_bull and rsi_buy and volume_confirmed:
                 return "BUY"
 
         if (trend_4h in ["BEARISH", "NEUTRAL"]) and btc_status != "BULLISH":
             ema_bear = latest['ema_fast'] < latest['ema_slow']
-            rsi_sell = (latest['rsi'] < 58 and prev['rsi'] >= 58) or (35 <= latest['rsi'] <= 52 and latest['rsi'] < prev['rsi'])
+            rsi_sell = (latest['rsi'] < 55 and prev['rsi'] >= 55) or (35 <= latest['rsi'] <= 50 and latest['rsi'] < prev['rsi'])
             if ema_bear and rsi_sell and volume_confirmed:
                 return "SELL"
 
         return None
 
-# ==================== ماژول معامله مجازی (با ریسک‌فری خودکار) ====================
+# ==================== معامله مجازی ====================
 class PaperTrader:
     def __init__(self, config: Config, telegram_sender):
         self.config = config
@@ -356,7 +247,7 @@ class PaperTrader:
                 tp1_dist = abs(trade['tp1'] - entry)
 
                 if side == "BUY":
-                    # انطباق حد زیان به نقطه ورود پس از طی ۵۰٪ راه تا TP1
+                    # ریسک‌فری خودکار بعد از ۵۰٪ مسیر
                     if not trade.get('be_active') and latest_high >= (entry + (0.5 * tp1_dist)):
                         trade['sl'] = entry
                         trade['be_active'] = True
@@ -389,7 +280,7 @@ class PaperTrader:
                         continue
 
             except Exception as e:
-                logger.error(f"خطا در بروزرسانی معامله مجازی {trade_id}: {e}")
+                logger.error(f"خطا در بروزرسانی {trade_id}: {e}")
 
         self._save_trades()
 
@@ -407,15 +298,15 @@ class TelegramSender:
     def send_system_status(self, text: str):
         try:
             requests.post(f"{self.base_url}/sendMessage", json={"chat_id": self.config.TELEGRAM_CHAT_ID, "text": text, "parse_mode": "Markdown"}, timeout=10)
-        except Exception as e:
-            logger.error(f"خطا: {e}")
+        except Exception:
+            pass
 
     def send_personal_message(self, text: str):
         target_id = self.config.PERSONAL_CHAT_ID or self.config.TELEGRAM_CHAT_ID
         try:
             requests.post(f"{self.base_url}/sendMessage", json={"chat_id": target_id, "text": text, "parse_mode": "Markdown"}, timeout=10)
-        except Exception as e:
-            logger.error(f"خطا: {e}")
+        except Exception:
+            pass
 
     def send_signal(self, symbol: str, side: str, latest: pd.Series, confidence: float, trend_4h: str) -> Dict:
         emoji = "🟢" if side == "BUY" else "🔴"
@@ -424,18 +315,18 @@ class TelegramSender:
         atr = float(latest['atr']) if not pd.isna(latest['atr']) else price * 0.01
 
         if side == "BUY":
-            stop_loss = round(min(float(latest['support']), price - (1.3 * atr)), 4)
+            stop_loss = round(min(float(latest['support']), price - (1.2 * atr)), 4)
             risk = price - stop_loss
-            tp1 = round(price + (1.6 * risk), 4)
-            tp2 = round(price + (2.8 * risk), 4)
-            tp3 = round(price + (4.5 * risk), 4)
+            tp1 = round(price + (1.8 * risk), 4)
+            tp2 = round(price + (3.0 * risk), 4)
+            tp3 = round(price + (5.0 * risk), 4)
             trailing_step = round(price + (1.0 * risk), 4)
         else:
-            stop_loss = round(max(float(latest['resistance']), price + (1.3 * atr)), 4)
+            stop_loss = round(max(float(latest['resistance']), price + (1.2 * atr)), 4)
             risk = stop_loss - price
-            tp1 = round(price - (1.6 * risk), 4)
-            tp2 = round(price - (2.8 * risk), 4)
-            tp3 = round(price - (4.5 * risk), 4)
+            tp1 = round(price - (1.8 * risk), 4)
+            tp2 = round(price - (3.0 * risk), 4)
+            tp3 = round(price - (5.0 * risk), 4)
             trailing_step = round(price - (1.0 * risk), 4)
 
         message = f"""
@@ -467,7 +358,6 @@ class TelegramSender:
 # ==================== سیستم اصلی ====================
 class HybridTradingSystem:
     def __init__(self):
-        global GLOBAL_PAPER_TRADER
         self.config = Config()
         self.config.validate()
         self.data = DataLayer(self.config)
@@ -475,7 +365,6 @@ class HybridTradingSystem:
         self.signal_engine = SignalEngine(self.config)
         self.telegram = TelegramSender(self.config)
         self.paper_trader = PaperTrader(self.config, self.telegram)
-        GLOBAL_PAPER_TRADER = self.paper_trader
         self.running = True
         self.last_signal_time: Dict[str, datetime] = {}
 
@@ -518,7 +407,7 @@ class HybridTradingSystem:
             logger.error(f"خطا در پردازش {symbol}: {e}")
 
     def run_once(self):
-        logger.info("----- شروع آنالیز پیشرفته بازار -----")
+        logger.info("----- اسکن دقیق بازار -----")
         btc_status = self.analysis.get_btc_status(self.data)
         for symbol in self.config.SYMBOLS:
             self.process_symbol(symbol, btc_status)
@@ -526,8 +415,8 @@ class HybridTradingSystem:
         self.paper_trader.update_and_check_trades(self.data)
 
     def start(self):
-        logger.info("بات V5.2 فعال شد")
-        self.telegram.send_system_status("⚡️ **ربات V5.2 با ریسک‌فری خودکار و فیلتر روند فعال شد.**")
+        logger.info("ربات V6 بدون نیاز به سرویس‌های جانبی فعال شد")
+        self.telegram.send_system_status("🚀 **ربات V6 با فیلتر نوسانات و اجرای روان بدون ارور فعال شد.**")
         while self.running:
             self.run_once()
             gc.collect()
