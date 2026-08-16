@@ -86,10 +86,10 @@ class Config:
     ENTRY_TIMEFRAME = "15m"
     TREND_TIMEFRAME = "4h"
     CHECK_INTERVAL = 300
-    MIN_CONFIDENCE_AI = 0.72  # قبلاً 0.80؛ برای افزایش فراوانی سیگنال کمی شل‌تر شد
+    MIN_CONFIDENCE_AI = 0.68  # قبلاً 0.72؛ برای افزایش بیشتر فراوانی سیگنال شل‌تر شد
 
     # --- مدیریت ریسک اضافه‌شده ---
-    MIN_ADX_STRENGTH = 16          # قبلاً 20؛ کمی شل‌تر برای صدور سیگنال بیشتر
+    MIN_ADX_STRENGTH = 12          # قبلاً 16؛ برای افزایش بیشتر فراوانی سیگنال شل‌تر شد
     MAX_CONCURRENT_TRADES = 6      # سقف تعداد معاملات همزمان برای کنترل ریسک کلی پرتفوی
     MAX_TRADES_PER_SYMBOL = 1      # هر نماد فقط یک معامله باز همزمان
     SIGNAL_COOLDOWN_MINUTES = 45   # قبلاً 90؛ فرصت سیگنال بیشتر روی هر نماد
@@ -97,6 +97,34 @@ class Config:
     # --- Position Sizing واقعی بر اساس درصد ریسک ثابت ---
     ACCOUNT_BALANCE_USDT = float(os.getenv("ACCOUNT_BALANCE_USDT", "1000"))  # سرمایه‌ی فرضی/واقعی حساب
     RISK_PER_TRADE_PCT = 1.5   # درصدی از کل سرمایه که در هر معامله در معرض خطره (استاندارد صنعت: 0.5 تا 2 درصد)
+    MAX_RISK_PER_TRADE_PCT = 2.5  # سقف مطلق ریسک هر معامله؛ حتی با تنظیم داشبورد در آینده از این بیشتر نمی‌شه
+
+    RISK_CONFIG_FILE = "risk_config.json"
+
+    def load_dynamic_risk_config(self):
+        """
+        این فایل جدا از کد اصلیه تا بعداً بشه از یه داشبورد بیرونی (یا حتی دستی) این
+        پارامترها رو بدون نیاز به ری‌دیپلوی کد تغییر داد. هر پارامتر یه سقف/کف منطقی
+        داره تا داشبورد نتونه به‌طور تصادفی ریسک رو به مقدار خطرناک ببره.
+        """
+        if not os.path.exists(self.RISK_CONFIG_FILE):
+            return
+        try:
+            with open(self.RISK_CONFIG_FILE, "r") as f:
+                overrides = json.load(f)
+
+            if "risk_per_trade_pct" in overrides:
+                self.RISK_PER_TRADE_PCT = min(float(overrides["risk_per_trade_pct"]), self.MAX_RISK_PER_TRADE_PCT)
+            if "min_adx_strength" in overrides:
+                self.MIN_ADX_STRENGTH = max(5, float(overrides["min_adx_strength"]))
+            if "min_confidence_ai" in overrides:
+                self.MIN_CONFIDENCE_AI = min(max(float(overrides["min_confidence_ai"]), 0.50), 0.98)
+            if "max_concurrent_trades" in overrides:
+                self.MAX_CONCURRENT_TRADES = max(1, int(overrides["max_concurrent_trades"]))
+            if "account_balance_usdt" in overrides:
+                self.ACCOUNT_BALANCE_USDT = max(0.0, float(overrides["account_balance_usdt"]))
+        except Exception as e:
+            logger.error(f"خطا در خواندن risk_config.json: {e} - از مقادیر پیش‌فرض استفاده می‌شه")
 
     def validate(self):
         required = {
@@ -247,7 +275,7 @@ class SignalEngine:
     def __init__(self, config: Config):
         self.config = config
 
-    def get_rule_signal(self, df_15m: pd.DataFrame, trend_4h: str) -> Optional[str]:
+    def get_rule_signal(self, df_15m: pd.DataFrame, trend_4h: str, trend_1h: str = "NEUTRAL") -> Optional[str]:
         latest = df_15m.iloc[-1]
         prev = df_15m.iloc[-2]
         
@@ -263,13 +291,15 @@ class SignalEngine:
 
         volume_confirmed = latest['volume'] > (latest['vol_sma'] * 0.50)
 
-        if trend_4h in ["BULLISH", "NEUTRAL"]:
+        # تایید سه‌تایم‌فریمی: تایم‌فریم ۱ساعته نباید مخالف جهت معامله باشه
+        # (فقط رد میشه اگه صراحتاً در جهت مخالف باشه، نه اینکه NEUTRAL باشه)
+        if trend_4h in ["BULLISH", "NEUTRAL"] and trend_1h != "BEARISH":
             ema_bull = latest['ema_fast'] > latest['ema_slow']
             rsi_buy = (latest['rsi'] > 42 and prev['rsi'] <= 42) or (48 <= latest['rsi'] <= 65 and latest['rsi'] > prev['rsi'])
             if ema_bull and rsi_buy and volume_confirmed:
                 return "BUY"
 
-        if trend_4h in ["BEARISH", "NEUTRAL"]:
+        if trend_4h in ["BEARISH", "NEUTRAL"] and trend_1h != "BULLISH":
             ema_bear = latest['ema_fast'] < latest['ema_slow']
             rsi_sell = (latest['rsi'] < 58 and prev['rsi'] >= 58) or (35 <= latest['rsi'] <= 52 and latest['rsi'] < prev['rsi'])
             if ema_bear and rsi_sell and volume_confirmed:
@@ -473,7 +503,11 @@ class TelegramSender:
             trailing_step = round(price - (1.0 * risk), 4)
 
         # --- Position Sizing واقعی: چند واحد از دارایی بر اساس درصد ریسک ثابت باید خرید/فروخت ---
-        risk_amount_usdt = self.config.ACCOUNT_BALANCE_USDT * (self.config.RISK_PER_TRADE_PCT / 100.0)
+        # سایز به‌صورت محدود با confidence هوش مصنوعی تنظیم می‌شه (سیگنال قوی‌تر = سایز کمی بزرگ‌تر)
+        # ولی هیچ‌وقت از MAX_RISK_PER_TRADE_PCT بیشتر نمی‌شه، صرف‌نظر از confidence
+        confidence_multiplier = 0.8 + (0.4 * min(max(confidence, 0.0), 1.0))  # بازه: 0.8x تا 1.2x
+        effective_risk_pct = min(self.config.RISK_PER_TRADE_PCT * confidence_multiplier, self.config.MAX_RISK_PER_TRADE_PCT)
+        risk_amount_usdt = self.config.ACCOUNT_BALANCE_USDT * (effective_risk_pct / 100.0)
         position_size_units = round(risk_amount_usdt / risk, 6) if risk > 0 else 0
         position_value_usdt = round(position_size_units * price, 2)
 
@@ -493,7 +527,7 @@ class TelegramSender:
 🛑 *Stop-Loss:* {stop_loss:,}
 ⚙️ *Auto Trailing:* SL → Breakeven after TP1, SL → TP1 after TP2
 
-💰 *Position Size (Risk {self.config.RISK_PER_TRADE_PCT}% of {self.config.ACCOUNT_BALANCE_USDT:,.0f} USDT):* {position_size_units} واحد (~{position_value_usdt:,} USDT)
+💰 *Position Size (Risk {effective_risk_pct:.2f}% of {self.config.ACCOUNT_BALANCE_USDT:,.0f} USDT):* {position_size_units} واحد (~{position_value_usdt:,} USDT)
 
 📊 *Metrics:* RSI: {latest['rsi']:.1f} | ADX: {latest['adx']:.1f} | AI Score: {confidence:.0%}
 ⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}
@@ -541,12 +575,16 @@ class HybridTradingSystem:
             df_15m = self.data.fetch_ohlcv(symbol, timeframe=self.config.ENTRY_TIMEFRAME)
             df_15m = self.analysis.calculate_indicators(df_15m)
 
+            df_1h = self.data.fetch_ohlcv(symbol, timeframe="1h")
+            df_1h = self.analysis.calculate_indicators(df_1h)
+            trend_1h = self.analysis.get_major_trend(df_1h)
+
             df_4h = self.data.fetch_ohlcv(symbol, timeframe=self.config.TREND_TIMEFRAME)
             df_4h = self.analysis.calculate_indicators(df_4h)
 
             trend_4h = self.analysis.get_major_trend(df_4h)
 
-            rule_signal = self.signal_engine.get_rule_signal(df_15m, trend_4h)
+            rule_signal = self.signal_engine.get_rule_signal(df_15m, trend_4h, trend_1h)
             if not rule_signal:
                 return
 
@@ -590,6 +628,7 @@ class HybridTradingSystem:
             logger.error(f"خطا در پردازش {symbol}: {e}")
 
     def run_once(self):
+        self.config.load_dynamic_risk_config()
         logger.info("----- شروع آنالیز پیشرفته بازار -----")
         for symbol in self.config.SYMBOLS:
             self.process_symbol(symbol)
