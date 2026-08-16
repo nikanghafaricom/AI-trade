@@ -2,6 +2,7 @@
 # Hybrid Signal Bot - نسخه جامع (V5 Ultimate Pro)
 # ==============================================
 import os
+import re
 import time
 import logging
 import requests
@@ -77,6 +78,11 @@ class Config:
     CHECK_INTERVAL = 300
     MIN_CONFIDENCE_AI = 0.80
 
+    # --- مدیریت ریسک اضافه‌شده ---
+    MIN_ADX_STRENGTH = 20          # زیر این مقدار یعنی بازار رنج/بی‌روند، سیگنال رد میشه
+    MAX_CONCURRENT_TRADES = 4      # سقف تعداد معاملات همزمان برای کنترل ریسک کلی پرتفوی
+    MAX_TRADES_PER_SYMBOL = 1      # هر نماد فقط یک معامله باز همزمان
+
     def validate(self):
         required = {
             "AI_API_KEY": self.AI_API_KEY,
@@ -128,9 +134,10 @@ class AnalysisLayer:
     def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         df = df.copy()
         
+        # RSI با میانگین‌گیری Wilder (استاندارد واقعی RSI، دقیق‌تر از rolling mean ساده)
         delta = df['close'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        gain = (delta.where(delta > 0, 0)).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+        loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
         rs = gain / loss
         df['rsi'] = 100 - (100 / (1 + rs))
 
@@ -143,6 +150,19 @@ class AnalysisLayer:
         low_close = (df['low'] - df['close'].shift()).abs()
         tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
         df['atr'] = tr.rolling(window=14).mean()
+
+        # ADX: قدرت روند. اضافه شده تا سیگنال‌های صادرشده در بازار بی‌روند/رنج فیلتر بشن
+        up_move = df['high'].diff()
+        down_move = -df['low'].diff()
+        plus_dm = pd.Series(0.0, index=df.index)
+        minus_dm = pd.Series(0.0, index=df.index)
+        plus_dm[(up_move > down_move) & (up_move > 0)] = up_move[(up_move > down_move) & (up_move > 0)]
+        minus_dm[(down_move > up_move) & (down_move > 0)] = down_move[(down_move > up_move) & (down_move > 0)]
+        atr_smooth = tr.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+        plus_di = 100 * (plus_dm.ewm(alpha=1/14, adjust=False, min_periods=14).mean() / atr_smooth)
+        minus_di = 100 * (minus_dm.ewm(alpha=1/14, adjust=False, min_periods=14).mean() / atr_smooth)
+        dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di)
+        df['adx'] = dx.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
 
         df['vol_sma'] = df['volume'].rolling(window=20).mean()
         df['support'] = df['low'].rolling(window=15).min()
@@ -162,20 +182,28 @@ class AnalysisLayer:
         latest = df.iloc[-1]
         prev = df.iloc[-2]
 
+        adx_value = latest['adx'] if not pd.isna(latest['adx']) else 0.0
+
         prompt = f"""
-You are an elite quantitative crypto trader.
+You are a highly risk-averse, skeptical quantitative crypto trader whose job is to REJECT
+mediocre setups, not to find reasons to approve them. Assume most signals are false positives
+unless the confluence of evidence is strong.
+
 Context:
 - Symbol: {symbol}
 - Trade Side: {side}
 - Higher Timeframe (4H) Trend: {trend}
 - 15m Close: {latest['close']}
 - RSI: {latest['rsi']:.1f}
+- ADX (trend strength): {adx_value:.1f}
 - EMA20/50: {latest['ema_fast']:.2f} / {latest['ema_slow']:.2f}
 - ATR Volatility: {latest['atr']:.4f}
 - Volume ratio: {latest['volume']/latest['vol_sma']:.2f}x
 
-Assign a final score (60 to 95) evaluating if this signal matches high-probability criteria.
-Output ONLY the integer score.
+Score this setup from 0 to 100 on probability of hitting TP before SL.
+Penalize heavily for: counter-trend entries, weak ADX (<20), weak/average volume, RSI near
+overbought/oversold extremes without confirmation.
+Reply with ONLY the integer score and nothing else.
 """
         try:
             response = self.client.chat.completions.create(
@@ -185,13 +213,19 @@ Output ONLY the integer score.
                 max_tokens=6
             )
             answer = response.choices[0].message.content.strip()
-            score = float(''.join(filter(str.isdigit, answer))) / 100.0
-            if score < 0.60 or score > 0.98:
-                score = 0.82
+            match = re.search(r'\d{1,3}', answer)
+            if not match:
+                raise ValueError(f"پاسخ قابل پارس نبود: '{answer}'")
+            raw_score = int(match.group())
+            raw_score = max(0, min(100, raw_score))
+            score = raw_score / 100.0
             return {"confidence": score}
         except Exception as e:
-            logger.error(f"خطای AI برای {symbol}: {e}")
-            return {"confidence": 0.80}
+            # نکته مهم: قبلاً اینجا یه مقدار پیش‌فرض بالای آستانه برمی‌گشت که یعنی
+            # وقتی AI خراب می‌شد سیگنال بدون تایید واقعی رد می‌شد به تلگرام!
+            # الان به‌جای فال‌بک خوش‌بینانه، سیگنال رد می‌شه تا فیلتر AI معنی واقعی داشته باشه.
+            logger.error(f"خطای AI برای {symbol}: {e} - سیگنال به‌صورت ایمن رد شد")
+            return {"confidence": 0.0}
 
 # ==================== موتور سیگنال ====================
 class SignalEngine:
@@ -206,6 +240,10 @@ class SignalEngine:
             return None
 
         if latest['atr'] < (latest['close'] * 0.0015):
+            return None
+
+        # فیلتر جدید: بازار بدون روند مشخص (ADX پایین) منبع اصلی سیگنال‌های کاذب هست
+        if pd.isna(latest['adx']) or latest['adx'] < self.config.MIN_ADX_STRENGTH:
             return None
 
         volume_confirmed = latest['volume'] > (latest['vol_sma'] * 0.50)
@@ -245,6 +283,11 @@ class PaperTrader:
         with open(self.file_path, "w") as f:
             json.dump(self.active_trades, f, indent=4)
 
+    # درصد پوزیشنی که در هر تارگت بسته می‌شه (جمعاً ۱۰۰٪)
+    TP1_PORTION = 0.50
+    TP2_PORTION = 0.30
+    TP3_PORTION = 0.20
+
     def open_virtual_trade(self, symbol: str, side: str, entry_price: float, tp1: float, tp2: float, tp3: float, sl: float):
         trade_id = f"{symbol}_{int(time.time())}"
         self.active_trades[trade_id] = {
@@ -255,9 +298,20 @@ class PaperTrader:
             "tp2": tp2,
             "tp3": tp3,
             "sl": sl,
+            "original_sl": sl,
+            "remaining_pct": 1.0,
+            "tp1_hit": False,
+            "tp2_hit": False,
+            "realized_pnl_contribution": 0.0,  # سهم وزن‌دار PnL بسته‌شده تا الان
             "open_time": datetime.now().strftime('%Y-%m-%d %H:%M')
         }
         self._save_trades()
+
+    @staticmethod
+    def _pnl_pct(side: str, entry: float, exit_price: float) -> float:
+        if side == "BUY":
+            return ((exit_price - entry) / entry) * 100
+        return ((entry - exit_price) / entry) * 100
 
     def update_and_check_trades(self, data_layer: DataLayer):
         for trade_id, trade in list(self.active_trades.items()):
@@ -266,54 +320,70 @@ class PaperTrader:
                 latest_high = float(df['high'].max())
                 latest_low = float(df['low'].min())
 
-                symbol = trade['symbol']
                 side = trade['side']
                 entry = trade['entry']
+                hit_high = latest_high if side == "BUY" else latest_low
+                hit_low = latest_low if side == "BUY" else latest_high
+                # hit_high/hit_low نرمال‌شده نسبت به جهت معامله: hit_high یعنی سمتی که به سود نزدیک‌تره
 
-                # ----------------- بررسی پوزیشن خرید (BUY) -----------------
-                if side == "BUY":
-                    # ۱. حد زیان
-                    if latest_low <= trade['sl']:
-                        pnl = ((trade['sl'] - entry) / entry) * 100
-                        self._send_close_report(trade, pnl)
-                        del self.active_trades[trade_id]
-                        continue
+                # ۱. حد ضرر (شامل حالتی که SL بعد از TP1/TP2 به breakeven/سود منتقل شده)
+                sl_triggered = (latest_low <= trade['sl']) if side == "BUY" else (latest_high >= trade['sl'])
+                if sl_triggered:
+                    pnl_leg = self._pnl_pct(side, entry, trade['sl'])
+                    total_pnl = trade['realized_pnl_contribution'] + (pnl_leg * trade['remaining_pct'])
+                    label = "SL/Breakeven" if trade['tp1_hit'] else "Stop-Loss"
+                    self._send_close_report(trade, total_pnl, label)
+                    del self.active_trades[trade_id]
+                    continue
 
-                    # ۲. رسیدن به تارگت اول (خروج با سود)
-                    elif latest_high >= trade['tp1']:
-                        pnl = ((trade['tp1'] - entry) / entry) * 100
-                        self._send_close_report(trade, pnl)
-                        del self.active_trades[trade_id]
-                        continue
+                # ۲. TP1 - بستن ۵۰٪ پوزیشن و انتقال SL به نقطه ورود (بدون ریسک برای باقیمانده)
+                tp1_hit_now = (latest_high >= trade['tp1']) if side == "BUY" else (latest_low <= trade['tp1'])
+                if not trade['tp1_hit'] and tp1_hit_now:
+                    pnl_leg = self._pnl_pct(side, entry, trade['tp1'])
+                    trade['realized_pnl_contribution'] += pnl_leg * self.TP1_PORTION
+                    trade['remaining_pct'] -= self.TP1_PORTION
+                    trade['tp1_hit'] = True
+                    trade['sl'] = entry  # breakeven
+                    self.telegram.send_personal_message(
+                        f"🟡 **TP1 زده شد - {trade['symbol']} ({side})**\n"
+                        f"۵۰٪ پوزیشن با {pnl_leg:+.2f}% بسته شد. SL به نقطه ورود (Breakeven) منتقل شد."
+                    )
 
-                # ----------------- بررسی پوزیشن فروش (SELL) -----------------
-                elif side == "SELL":
-                    # ۱. حد زیان
-                    if latest_high >= trade['sl']:
-                        pnl = ((entry - trade['sl']) / entry) * 100
-                        self._send_close_report(trade, pnl)
-                        del self.active_trades[trade_id]
-                        continue
+                # ۳. TP2 - بستن ۳۰٪ دیگر و انتقال SL به سطح TP1 (قفل کردن بخشی از سود)
+                tp2_hit_now = (latest_high >= trade['tp2']) if side == "BUY" else (latest_low <= trade['tp2'])
+                if trade['tp1_hit'] and not trade['tp2_hit'] and tp2_hit_now:
+                    pnl_leg = self._pnl_pct(side, entry, trade['tp2'])
+                    trade['realized_pnl_contribution'] += pnl_leg * self.TP2_PORTION
+                    trade['remaining_pct'] -= self.TP2_PORTION
+                    trade['tp2_hit'] = True
+                    trade['sl'] = trade['tp1']  # قفل کردن سود تا سطح TP1
+                    self.telegram.send_personal_message(
+                        f"🟡 **TP2 زده شد - {trade['symbol']} ({side})**\n"
+                        f"۳۰٪ دیگر با {pnl_leg:+.2f}% بسته شد. SL به سطح TP1 منتقل شد."
+                    )
 
-                    # ۲. رسیدن به تارگت اول (خروج با سود)
-                    elif latest_low <= trade['tp1']:
-                        pnl = ((entry - trade['tp1']) / entry) * 100
-                        self._send_close_report(trade, pnl)
-                        del self.active_trades[trade_id]
-                        continue
+                # ۴. TP3 - بستن کامل باقیمانده پوزیشن
+                tp3_hit_now = (latest_high >= trade['tp3']) if side == "BUY" else (latest_low <= trade['tp3'])
+                if trade['tp1_hit'] and trade['tp2_hit'] and tp3_hit_now:
+                    pnl_leg = self._pnl_pct(side, entry, trade['tp3'])
+                    total_pnl = trade['realized_pnl_contribution'] + (pnl_leg * trade['remaining_pct'])
+                    self._send_close_report(trade, total_pnl, "TP3 - Full Target")
+                    del self.active_trades[trade_id]
+                    continue
 
             except Exception as e:
                 logger.error(f"خطا در بروزرسانی معامله مجازی {trade_id}: {e}")
 
         self._save_trades()
 
-    def _send_close_report(self, trade: Dict, pnl: float):
+    def _send_close_report(self, trade: Dict, pnl: float, reason: str = ""):
         emoji = "✅" if pnl > 0 else "❌"
+        reason_line = f"🔎 *دلیل:* {reason}\n" if reason else ""
         msg = f"""
-{emoji} **معامله بسته شد**
+{emoji} *معامله بسته شد (نتیجه نهایی)*
 
-📌 **ارز:** {trade['symbol']} ({trade['side']})
-📈 **سود/زیان:** {pnl:+.2f}%
+📌 *ارز:* {trade['symbol']} ({trade['side']})
+{reason_line}📈 *سود/زیان کل (وزن‌دار):* {pnl:+.2f}%
 """
         self.telegram.send_personal_message(msg)
 
@@ -376,22 +446,22 @@ class TelegramSender:
             trailing_step = round(price - (1.0 * risk), 4)
 
         message = f"""
-{emoji} **ULTRA SIGNAL: {side} / {direction}**
+{emoji} *ULTRA SIGNAL: {side} / {direction}*
 
-📍 **Symbol:** {symbol}
-⏱ **Timeframe:** {self.config.ENTRY_TIMEFRAME} (Trend 4H: {trend_4h})
+📍 *Symbol:* {symbol}
+⏱ *Timeframe:* {self.config.ENTRY_TIMEFRAME} (Trend 4H: {trend_4h})
 
-💵 **Entry Price:** {price:,}
+💵 *Entry Price:* {price:,}
 
-🎯 **Dynamic Targets:**
-  1️⃣ TP1: {tp1:,}
-  2️⃣ TP2: {tp2:,}
-  3️⃣ TP3 (Max Yield): {tp3:,}
+🎯 *Dynamic Targets (partial exits: 50% / 30% / 20%):*
+  1️⃣ TP1 (50%): {tp1:,}
+  2️⃣ TP2 (30%): {tp2:,}
+  3️⃣ TP3 (20%, Max Yield): {tp3:,}
 
-🛑 **Stop-Loss:** {stop_loss:,}
-⚙️ **Trailing Stop Trigger:** Move SL to Entry at {trailing_step:,}
+🛑 *Stop-Loss:* {stop_loss:,}
+⚙️ *Auto Trailing:* SL → Breakeven after TP1, SL → TP1 after TP2
 
-📊 **Metrics:** RSI: {latest['rsi']:.1f} | AI Score: {confidence:.0%}
+📊 *Metrics:* RSI: {latest['rsi']:.1f} | ADX: {latest['adx']:.1f} | AI Score: {confidence:.0%}
 ⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}
 """
         try:
@@ -442,6 +512,16 @@ class HybridTradingSystem:
 
             rule_signal = self.signal_engine.get_rule_signal(df_15m, trend_4h)
             if not rule_signal:
+                return
+
+            # سقف کلی معاملات همزمان برای جلوگیری از قرارگیری بیش‌ازحد در معرض ریسک
+            if len(self.paper_trader.active_trades) >= self.config.MAX_CONCURRENT_TRADES:
+                logger.info(f"سقف معاملات همزمان پره، سیگنال {symbol} نادیده گرفته شد")
+                return
+
+            # جلوگیری از باز کردن چند پوزیشن روی یک نماد
+            open_for_symbol = sum(1 for t in self.paper_trader.active_trades.values() if t['symbol'] == symbol)
+            if open_for_symbol >= self.config.MAX_TRADES_PER_SYMBOL:
                 return
 
             now = datetime.now()
