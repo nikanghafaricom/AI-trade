@@ -1,5 +1,5 @@
 # ==============================================
-# Hybrid Signal Bot V5 Ultimate + MiniApp Dashboard (Enhanced AI)
+# Hybrid Signal Bot V5 Ultimate + MiniApp Dashboard
 # ==============================================
 import os
 import time
@@ -8,6 +8,7 @@ import requests
 import gc
 import json
 import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timedelta
 from typing import Dict, Optional, List
 import pandas as pd
@@ -44,8 +45,8 @@ class Config:
 
     ENTRY_TIMEFRAME = "15m"
     TREND_TIMEFRAME = "4h"
-    CHECK_INTERVAL = 180  # بهینه‌سازی زمان اسکن به ۳ دقیقه
-    MIN_CONFIDENCE_AI = 0.78  # تنظیم دقیق‌تر آستانه پذیرش سیگنال
+    CHECK_INTERVAL = 300
+    MIN_CONFIDENCE_AI = 0.80
 
     def validate(self):
         required = {
@@ -192,7 +193,7 @@ class DataLayer:
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         return df
 
-# ==================== لایه تحلیل (ارتقا یافته) ====================
+# ==================== لایه تحلیل ====================
 class AnalysisLayer:
     def __init__(self, config: Config):
         self.config = config
@@ -232,27 +233,22 @@ class AnalysisLayer:
             return "BEARISH"
         return "NEUTRAL"
 
-    # پرامپت تحلیل هوش مصنوعی پیشرفته‌تر شده تا تاییدهای دقیق‌تری بدهد
     def get_ai_confirmation(self, symbol: str, side: str, df: pd.DataFrame, trend: str) -> Dict:
         latest = df.iloc[-1]
-        vol_ratio = latest['volume'] / latest['vol_sma'] if latest['vol_sma'] > 0 else 1.0
-        
         prompt = f"""
-You are an advanced quantitative crypto risk officer.
-Evaluate this setup carefully:
+You are an elite quantitative crypto trader.
+Context:
 - Symbol: {symbol}
-- Trade Direction: {side}
-- 4H Higher Timeframe Trend: {trend}
-- 15m Price: {latest['close']}
-- Key Support: {latest['support']} | Resistance: {latest['resistance']}
-- Technicals: RSI(14)={latest['rsi']:.1f}, EMA20={latest['ema_fast']:.2f}, EMA50={latest['ema_slow']:.2f}
-- Market Dynamics: ATR={latest['atr']:.4f}, Volume Multiplier={vol_ratio:.2f}x
+- Trade Side: {side}
+- Higher Timeframe (4H) Trend: {trend}
+- 15m Close: {latest['close']}
+- RSI: {latest['rsi']:.1f}
+- EMA20/50: {latest['ema_fast']:.2f} / {latest['ema_slow']:.2f}
+- ATR Volatility: {latest['atr']:.4f}
+- Volume ratio: {latest['volume']/latest['vol_sma']:.2f}x
 
-Evaluation Rule:
-Assign an integer score between 60 and 95 based on trend alignment, volume confirmation, and S/R room.
-If signal conflicts with trend or high risk, rate low (<75).
-
-Output ONLY the raw integer score (e.g. 85).
+Assign a final score (60 to 95) evaluating if this signal matches high-probability criteria.
+Output ONLY the integer score.
 """
         try:
             response = self.client.chat.completions.create(
