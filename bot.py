@@ -71,17 +71,32 @@ class Config:
         "ADA/USDT",
         "DOGE/USDT",
         "LINK/USDT",
+        "TON/USDT",
+        "SUI/USDT",
+        "APT/USDT",
+        "ARB/USDT",
+        "OP/USDT",
+        "LTC/USDT",
+        "DOT/USDT",
+        "TRX/USDT",
+        "INJ/USDT",
+        "FIL/USDT",
     ]
 
     ENTRY_TIMEFRAME = "15m"
     TREND_TIMEFRAME = "4h"
     CHECK_INTERVAL = 300
-    MIN_CONFIDENCE_AI = 0.80
+    MIN_CONFIDENCE_AI = 0.72  # قبلاً 0.80؛ برای افزایش فراوانی سیگنال کمی شل‌تر شد
 
     # --- مدیریت ریسک اضافه‌شده ---
-    MIN_ADX_STRENGTH = 20          # زیر این مقدار یعنی بازار رنج/بی‌روند، سیگنال رد میشه
-    MAX_CONCURRENT_TRADES = 4      # سقف تعداد معاملات همزمان برای کنترل ریسک کلی پرتفوی
+    MIN_ADX_STRENGTH = 16          # قبلاً 20؛ کمی شل‌تر برای صدور سیگنال بیشتر
+    MAX_CONCURRENT_TRADES = 6      # سقف تعداد معاملات همزمان برای کنترل ریسک کلی پرتفوی
     MAX_TRADES_PER_SYMBOL = 1      # هر نماد فقط یک معامله باز همزمان
+    SIGNAL_COOLDOWN_MINUTES = 45   # قبلاً 90؛ فرصت سیگنال بیشتر روی هر نماد
+
+    # --- Position Sizing واقعی بر اساس درصد ریسک ثابت ---
+    ACCOUNT_BALANCE_USDT = float(os.getenv("ACCOUNT_BALANCE_USDT", "1000"))  # سرمایه‌ی فرضی/واقعی حساب
+    RISK_PER_TRADE_PCT = 1.5   # درصدی از کل سرمایه که در هر معامله در معرض خطره (استاندارد صنعت: 0.5 تا 2 درصد)
 
     def validate(self):
         required = {
@@ -288,7 +303,8 @@ class PaperTrader:
     TP2_PORTION = 0.30
     TP3_PORTION = 0.20
 
-    def open_virtual_trade(self, symbol: str, side: str, entry_price: float, tp1: float, tp2: float, tp3: float, sl: float):
+    def open_virtual_trade(self, symbol: str, side: str, entry_price: float, tp1: float, tp2: float, tp3: float, sl: float,
+                            position_size_units: float = 0.0, position_value_usdt: float = 0.0):
         trade_id = f"{symbol}_{int(time.time())}"
         self.active_trades[trade_id] = {
             "symbol": symbol,
@@ -303,6 +319,8 @@ class PaperTrader:
             "tp1_hit": False,
             "tp2_hit": False,
             "realized_pnl_contribution": 0.0,  # سهم وزن‌دار PnL بسته‌شده تا الان
+            "position_size_units": position_size_units,
+            "position_value_usdt": position_value_usdt,
             "open_time": datetime.now().strftime('%Y-%m-%d %H:%M')
         }
         self._save_trades()
@@ -379,11 +397,12 @@ class PaperTrader:
     def _send_close_report(self, trade: Dict, pnl: float, reason: str = ""):
         emoji = "✅" if pnl > 0 else "❌"
         reason_line = f"🔎 *دلیل:* {reason}\n" if reason else ""
+        usdt_pnl = round(trade.get('position_value_usdt', 0.0) * (pnl / 100.0), 2)
         msg = f"""
 {emoji} *معامله بسته شد (نتیجه نهایی)*
 
 📌 *ارز:* {trade['symbol']} ({trade['side']})
-{reason_line}📈 *سود/زیان کل (وزن‌دار):* {pnl:+.2f}%
+{reason_line}📈 *سود/زیان کل (وزن‌دار):* {pnl:+.2f}% (~{usdt_pnl:+,.2f} USDT)
 """
         self.telegram.send_personal_message(msg)
 
@@ -429,21 +448,34 @@ class TelegramSender:
         atr = float(latest['atr']) if not pd.isna(latest['atr']) else price * 0.01
 
         if side == "BUY":
-            stop_loss = min(float(latest['support']), price - (1.3 * atr))
+            raw_sl = min(float(latest['support']), price - (1.3 * atr))
+            # محدود کردن فاصله‌ی SL بین 0.8×ATR (خیلی تنگ نشه) و 2.5×ATR (خیلی گشاد نشه)
+            # تا هم از نویز در امان باشه هم TP ها به فاصله‌ی غیرمنطقی دور نرن
+            min_dist = 0.8 * atr
+            max_dist = 2.5 * atr
+            dist = min(max(price - raw_sl, min_dist), max_dist)
+            stop_loss = round(price - dist, 4)
             risk = price - stop_loss
             tp1 = round(price + (1.5 * risk), 4)
             tp2 = round(price + (2.5 * risk), 4)
             tp3 = round(price + (4.2 * risk), 4)
-            stop_loss = round(stop_loss, 4)
             trailing_step = round(price + (1.0 * risk), 4)
         else:
-            stop_loss = max(float(latest['resistance']), price + (1.3 * atr))
+            raw_sl = max(float(latest['resistance']), price + (1.3 * atr))
+            min_dist = 0.8 * atr
+            max_dist = 2.5 * atr
+            dist = min(max(raw_sl - price, min_dist), max_dist)
+            stop_loss = round(price + dist, 4)
             risk = stop_loss - price
             tp1 = round(price - (1.5 * risk), 4)
             tp2 = round(price - (2.5 * risk), 4)
             tp3 = round(price - (4.2 * risk), 4)
-            stop_loss = round(stop_loss, 4)
             trailing_step = round(price - (1.0 * risk), 4)
+
+        # --- Position Sizing واقعی: چند واحد از دارایی بر اساس درصد ریسک ثابت باید خرید/فروخت ---
+        risk_amount_usdt = self.config.ACCOUNT_BALANCE_USDT * (self.config.RISK_PER_TRADE_PCT / 100.0)
+        position_size_units = round(risk_amount_usdt / risk, 6) if risk > 0 else 0
+        position_value_usdt = round(position_size_units * price, 2)
 
         message = f"""
 {emoji} *ULTRA SIGNAL: {side} / {direction}*
@@ -460,6 +492,8 @@ class TelegramSender:
 
 🛑 *Stop-Loss:* {stop_loss:,}
 ⚙️ *Auto Trailing:* SL → Breakeven after TP1, SL → TP1 after TP2
+
+💰 *Position Size (Risk {self.config.RISK_PER_TRADE_PCT}% of {self.config.ACCOUNT_BALANCE_USDT:,.0f} USDT):* {position_size_units} واحد (~{position_value_usdt:,} USDT)
 
 📊 *Metrics:* RSI: {latest['rsi']:.1f} | ADX: {latest['adx']:.1f} | AI Score: {confidence:.0%}
 ⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}
@@ -481,7 +515,9 @@ class TelegramSender:
                 "tp1": tp1,
                 "tp2": tp2,
                 "tp3": tp3,
-                "sl": stop_loss
+                "sl": stop_loss,
+                "position_size_units": position_size_units,
+                "position_value_usdt": position_value_usdt
             }
         except Exception as e:
             logger.error(f"خطای ارسال تلگرام: {e}")
@@ -526,7 +562,7 @@ class HybridTradingSystem:
 
             now = datetime.now()
             if symbol in self.last_signal_time:
-                if now - self.last_signal_time[symbol] < timedelta(minutes=90):
+                if now - self.last_signal_time[symbol] < timedelta(minutes=self.config.SIGNAL_COOLDOWN_MINUTES):
                     return
 
             latest = df_15m.iloc[-1]
@@ -543,7 +579,9 @@ class HybridTradingSystem:
                         tp1=trade_data["tp1"],
                         tp2=trade_data["tp2"],
                         tp3=trade_data["tp3"],
-                        sl=trade_data["sl"]
+                        sl=trade_data["sl"],
+                        position_size_units=trade_data.get("position_size_units", 0.0),
+                        position_value_usdt=trade_data.get("position_value_usdt", 0.0)
                     )
 
                 self.last_signal_time[symbol] = now
