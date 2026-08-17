@@ -60,28 +60,16 @@ class Config:
     TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
     PERSONAL_CHAT_ID = os.getenv("PERSONAL_CHAT_ID")
 
-    SYMBOLS = [
-        "BTC/USDT",
-        "ETH/USDT",
-        "SOL/USDT",
-        "BNB/USDT",
-        "XRP/USDT",
-        "AVAX/USDT",
-        "NEAR/USDT",
-        "ADA/USDT",
-        "DOGE/USDT",
-        "LINK/USDT",
-        "TON/USDT",
-        "SUI/USDT",
-        "APT/USDT",
-        "ARB/USDT",
-        "OP/USDT",
-        "LTC/USDT",
-        "DOT/USDT",
-        "TRX/USDT",
-        "INJ/USDT",
-        "FIL/USDT",
+    # لیست ثابت فقط به‌عنوان fallback استفاده می‌شه اگه دریافت لیست پویا از صرافی fail کنه
+    FALLBACK_SYMBOLS = [
+        "BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT",
+        "AVAX/USDT", "NEAR/USDT", "ADA/USDT", "DOGE/USDT", "LINK/USDT",
     ]
+    SYMBOLS = list(FALLBACK_SYMBOLS)  # در ابتدای اجرا با لیست پویا جایگزین می‌شه
+
+    MAX_SYMBOLS_TO_SCAN = 80          # سقف تعداد نمادهایی که هر چرخه اسکن می‌شن
+    MIN_QUOTE_VOLUME_USDT = 300_000   # حداقل حجم معاملات ۲۴ساعته برای ورود به لیست (فیلتر نقدشوندگی)
+    SYMBOL_REFRESH_HOURS = 12         # هر چند ساعت یک‌بار لیست نمادهای نقدشونده دوباره از صرافی گرفته بشه
 
     ENTRY_TIMEFRAME = "15m"
     TREND_TIMEFRAME = "4h"
@@ -164,6 +152,38 @@ class DataLayer:
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         return df
+
+    def get_liquid_symbols(self, quote: str = "USDT", limit: int = 80, min_quote_volume: float = 300_000) -> List[str]:
+        """
+        به‌جای لیست دستی و ثابت نمادها، مستقیم از خود صرافی همه‌ی جفت‌ارزهای فعال با
+        نقدینگی کافی رو می‌گیره و بر اساس حجم معاملات ۲۴ساعته مرتب می‌کنه. نمادهای
+        کم‌حجم/کم‌نقدینگی به‌طور خودکار حذف می‌شن چون اسپرد بالا و اسلیپیج زیاد دارن.
+        """
+        try:
+            markets = self.exchange.load_markets()
+            tickers = self.exchange.fetch_tickers()
+            candidates = []
+            for symbol, market in markets.items():
+                if not market.get('active', True):
+                    continue
+                if market.get('quote') != quote or market.get('type') != 'spot':
+                    continue
+                ticker = tickers.get(symbol)
+                if not ticker:
+                    continue
+                quote_volume = ticker.get('quoteVolume') or 0
+                if quote_volume >= min_quote_volume:
+                    candidates.append((symbol, quote_volume))
+
+            candidates.sort(key=lambda x: x[1], reverse=True)
+            symbols = [s for s, _ in candidates[:limit]]
+            if symbols:
+                logger.info(f"{len(symbols)} نماد نقدشونده از {quote} پیدا شد")
+                return symbols
+        except Exception as e:
+            logger.error(f"خطا در دریافت لیست نمادهای نقدشونده: {e}")
+
+        return []
 
 # ==================== لایه تحلیل ====================
 class AnalysisLayer:
@@ -262,13 +282,13 @@ Reply with ONLY the integer score and nothing else.
             raw_score = int(match.group())
             raw_score = max(0, min(100, raw_score))
             score = raw_score / 100.0
-            return {"confidence": score}
+            return {"confidence": score, "error": False}
         except Exception as e:
             # نکته مهم: قبلاً اینجا یه مقدار پیش‌فرض بالای آستانه برمی‌گشت که یعنی
             # وقتی AI خراب می‌شد سیگنال بدون تایید واقعی رد می‌شد به تلگرام!
             # الان به‌جای فال‌بک خوش‌بینانه، سیگنال رد می‌شه تا فیلتر AI معنی واقعی داشته باشه.
             logger.error(f"خطای AI برای {symbol}: {e} - سیگنال به‌صورت ایمن رد شد")
-            return {"confidence": 0.0}
+            return {"confidence": 0.0, "error": True}
 
 # ==================== موتور سیگنال ====================
 class SignalEngine:
@@ -393,7 +413,7 @@ class PaperTrader:
                     trade['tp1_hit'] = True
                     trade['sl'] = entry  # breakeven
                     self.telegram.send_personal_message(
-                        f"🟡 **TP1 زده شد - {trade['symbol']} ({side})**\n"
+                        f"🟡 *TP1 زده شد - {trade['symbol']} ({side})*\n"
                         f"۵۰٪ پوزیشن با {pnl_leg:+.2f}% بسته شد. SL به نقطه ورود (Breakeven) منتقل شد."
                     )
 
@@ -406,7 +426,7 @@ class PaperTrader:
                     trade['tp2_hit'] = True
                     trade['sl'] = trade['tp1']  # قفل کردن سود تا سطح TP1
                     self.telegram.send_personal_message(
-                        f"🟡 **TP2 زده شد - {trade['symbol']} ({side})**\n"
+                        f"🟡 *TP2 زده شد - {trade['symbol']} ({side})*\n"
                         f"۳۰٪ دیگر با {pnl_leg:+.2f}% بسته شد. SL به سطح TP1 منتقل شد."
                     )
 
@@ -569,9 +589,27 @@ class HybridTradingSystem:
         self.paper_trader = PaperTrader(self.config, self.telegram)
         self.running = True
         self.last_signal_time: Dict[str, datetime] = {}
+        self.last_symbol_refresh: Optional[datetime] = None
+        self.cycle_stats = {"scanned": 0, "rule_passed": 0, "ai_passed": 0, "ai_errors": 0}
+        self._refresh_symbol_list()
+
+    def _refresh_symbol_list(self):
+        symbols = self.data.get_liquid_symbols(
+            limit=self.config.MAX_SYMBOLS_TO_SCAN,
+            min_quote_volume=self.config.MIN_QUOTE_VOLUME_USDT
+        )
+        if symbols:
+            self.config.SYMBOLS = symbols
+        else:
+            self.config.SYMBOLS = list(self.config.FALLBACK_SYMBOLS)
+            logger.warning("لیست پویای نمادها دریافت نشد، از لیست fallback استفاده می‌شه")
+        self.last_symbol_refresh = datetime.now()
+        logger.info(f"در حال اسکن {len(self.config.SYMBOLS)} نماد")
 
     def process_symbol(self, symbol: str):
         try:
+            self.cycle_stats["scanned"] += 1
+
             df_15m = self.data.fetch_ohlcv(symbol, timeframe=self.config.ENTRY_TIMEFRAME)
             df_15m = self.analysis.calculate_indicators(df_15m)
 
@@ -587,6 +625,8 @@ class HybridTradingSystem:
             rule_signal = self.signal_engine.get_rule_signal(df_15m, trend_4h, trend_1h)
             if not rule_signal:
                 return
+
+            self.cycle_stats["rule_passed"] += 1
 
             # سقف کلی معاملات همزمان برای جلوگیری از قرارگیری بیش‌ازحد در معرض ریسک
             if len(self.paper_trader.active_trades) >= self.config.MAX_CONCURRENT_TRADES:
@@ -605,8 +645,11 @@ class HybridTradingSystem:
 
             latest = df_15m.iloc[-1]
             ai_result = self.analysis.get_ai_confirmation(symbol, rule_signal, df_15m, trend_4h)
+            if ai_result.get("error"):
+                self.cycle_stats["ai_errors"] += 1
 
             if ai_result["confidence"] >= self.config.MIN_CONFIDENCE_AI:
+                self.cycle_stats["ai_passed"] += 1
                 trade_data = self.telegram.send_signal(symbol, rule_signal, latest, ai_result["confidence"], trend_4h)
                 
                 if trade_data:
@@ -629,16 +672,27 @@ class HybridTradingSystem:
 
     def run_once(self):
         self.config.load_dynamic_risk_config()
-        logger.info("----- شروع آنالیز پیشرفته بازار -----")
+
+        if datetime.now() - self.last_symbol_refresh >= timedelta(hours=self.config.SYMBOL_REFRESH_HOURS):
+            self._refresh_symbol_list()
+
+        self.cycle_stats = {"scanned": 0, "rule_passed": 0, "ai_passed": 0, "ai_errors": 0}
+        logger.info(f"----- شروع آنالیز پیشرفته بازار ({len(self.config.SYMBOLS)} نماد) -----")
         for symbol in self.config.SYMBOLS:
             self.process_symbol(symbol)
-            time.sleep(1.5)
-            
+            time.sleep(0.4)  # با تعداد نماد بیشتر، فاصله کمتر شد تا کل چرخه در بازه‌ی CHECK_INTERVAL جا بشه
+
+        logger.info(
+            f"----- پایان چرخه | اسکن‌شده: {self.cycle_stats['scanned']} | "
+            f"رد فیلتر تکنیکال: {self.cycle_stats['rule_passed']} | "
+            f"تایید AI: {self.cycle_stats['ai_passed']} | خطای AI: {self.cycle_stats['ai_errors']} -----"
+        )
+
         self.paper_trader.update_and_check_trades(self.data)
 
     def start(self):
         logger.info("بات V5 Ultimate Pro فعال شد")
-        start_message = "⚡️ **نسخه جامع V5 Ultimate Pro فعال شد.**\n\nسیستم با تحلیل چند تایم‌فریم (MTF) و تریلینگ استاپ آماده‌سازی شد."
+        start_message = "⚡️ *نسخه جامع V5 Ultimate Pro فعال شد.*\n\nسیستم با تحلیل چند تایم‌فریم (MTF)، پوشش پویای نمادهای نقدشونده، و تریلینگ استاپ واقعی آماده‌سازی شد."
         self.telegram.send_system_status(start_message)
 
         while self.running:
