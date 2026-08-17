@@ -623,6 +623,15 @@ class HybridTradingSystem:
             trend_4h = self.analysis.get_major_trend(df_4h)
 
             rule_signal = self.signal_engine.get_rule_signal(df_15m, trend_4h, trend_1h)
+
+            latest_debug = df_15m.iloc[-1]
+            logger.info(
+                f"[DEBUG] {symbol} | trend4h={trend_4h} trend1h={trend_1h} | "
+                f"RSI={latest_debug['rsi']:.1f} ADX={latest_debug['adx']:.1f} "
+                f"ATR%={(latest_debug['atr']/latest_debug['close']*100):.3f} | "
+                f"signal={rule_signal}"
+            )
+
             if not rule_signal:
                 return
 
