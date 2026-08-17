@@ -315,13 +315,16 @@ class SignalEngine:
         # (فقط رد میشه اگه صراحتاً در جهت مخالف باشه، نه اینکه NEUTRAL باشه)
         if trend_4h in ["BULLISH", "NEUTRAL"] and trend_1h != "BEARISH":
             ema_bull = latest['ema_fast'] > latest['ema_slow']
-            rsi_buy = (latest['rsi'] > 42 and prev['rsi'] <= 42) or (48 <= latest['rsi'] <= 65 and latest['rsi'] > prev['rsi'])
+            # قبلاً فقط لحظه‌ی دقیق عبور RSI از ۴۲ یا محدوده‌ی خیلی تنگ ۴۸-۶۵ قبول می‌شد که
+            # باعث می‌شد فرصت‌های خوب (مثل RSI=۲۹ با ADX=۳۶، یعنی روند نزولی قوی) رد بشن.
+            # الان یه محدوده‌ی منطقی‌تر همراه با تایید جهت حرکت RSI قبول می‌شه.
+            rsi_buy = (35 <= latest['rsi'] <= 72) and (latest['rsi'] > prev['rsi'])
             if ema_bull and rsi_buy and volume_confirmed:
                 return "BUY"
 
         if trend_4h in ["BEARISH", "NEUTRAL"] and trend_1h != "BULLISH":
             ema_bear = latest['ema_fast'] < latest['ema_slow']
-            rsi_sell = (latest['rsi'] < 58 and prev['rsi'] >= 58) or (35 <= latest['rsi'] <= 52 and latest['rsi'] < prev['rsi'])
+            rsi_sell = (28 <= latest['rsi'] <= 65) and (latest['rsi'] < prev['rsi'])
             if ema_bear and rsi_sell and volume_confirmed:
                 return "SELL"
 
