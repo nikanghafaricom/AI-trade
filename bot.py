@@ -296,37 +296,82 @@ class SignalEngine:
         self.config = config
 
     def get_rule_signal(self, df_15m: pd.DataFrame, trend_4h: str, trend_1h: str = "NEUTRAL") -> Optional[str]:
+        """
+        قبلاً همه‌ی شرط‌ها (روند ۴ساعته + روند ۱ساعته + کراس EMA + محدوده‌ی RSI + حجم) باید
+        هم‌زمان True می‌شدن (زنجیره‌ی AND) که احتمال ریاضی رخ دادنش خیلی پایین بود، حتی وقتی
+        هرکدوم به‌تنهایی معقول بودن. الان یه سیستم امتیازی جایگزینش شده: هر عامل امتیاز می‌ده،
+        و رسیدن به حداقل امتیاز (نه لزوماً همه‌ی عوامل) کافیه تا سیگنال تایید بشه.
+        """
         latest = df_15m.iloc[-1]
         prev = df_15m.iloc[-2]
-        
-        if pd.isna(latest['rsi']) or pd.isna(latest['ema_fast']) or pd.isna(latest['atr']):
+
+        if pd.isna(latest['rsi']) or pd.isna(latest['ema_fast']) or pd.isna(latest['atr']) or pd.isna(latest['adx']):
             return None
 
         if latest['atr'] < (latest['close'] * 0.0015):
             return None
 
-        # فیلتر جدید: بازار بدون روند مشخص (ADX پایین) منبع اصلی سیگنال‌های کاذب هست
-        if pd.isna(latest['adx']) or latest['adx'] < self.config.MIN_ADX_STRENGTH:
-            return None
-
         volume_confirmed = latest['volume'] > (latest['vol_sma'] * 0.50)
+        strong_volume = latest['volume'] > (latest['vol_sma'] * 1.0)
+        strong_adx = latest['adx'] >= self.config.MIN_ADX_STRENGTH
 
-        # تایید سه‌تایم‌فریمی: تایم‌فریم ۱ساعته نباید مخالف جهت معامله باشه
-        # (فقط رد میشه اگه صراحتاً در جهت مخالف باشه، نه اینکه NEUTRAL باشه)
-        if trend_4h in ["BULLISH", "NEUTRAL"] and trend_1h != "BEARISH":
-            ema_bull = latest['ema_fast'] > latest['ema_slow']
-            # قبلاً فقط لحظه‌ی دقیق عبور RSI از ۴۲ یا محدوده‌ی خیلی تنگ ۴۸-۶۵ قبول می‌شد که
-            # باعث می‌شد فرصت‌های خوب (مثل RSI=۲۹ با ADX=۳۶، یعنی روند نزولی قوی) رد بشن.
-            # الان یه محدوده‌ی منطقی‌تر همراه با تایید جهت حرکت RSI قبول می‌شه.
-            rsi_buy = (35 <= latest['rsi'] <= 72) and (latest['rsi'] > prev['rsi'])
-            if ema_bull and rsi_buy and volume_confirmed:
-                return "BUY"
+        ema_bull = latest['ema_fast'] > latest['ema_slow']
+        ema_bear = latest['ema_fast'] < latest['ema_slow']
 
-        if trend_4h in ["BEARISH", "NEUTRAL"] and trend_1h != "BULLISH":
-            ema_bear = latest['ema_fast'] < latest['ema_slow']
-            rsi_sell = (28 <= latest['rsi'] <= 65) and (latest['rsi'] < prev['rsi'])
-            if ema_bear and rsi_sell and volume_confirmed:
-                return "SELL"
+        rsi_buy_zone = (35 <= latest['rsi'] <= 72) and (latest['rsi'] > prev['rsi'])
+        rsi_sell_zone = (28 <= latest['rsi'] <= 65) and (latest['rsi'] < prev['rsi'])
+
+        # --- امتیازدهی سمت خرید ---
+        buy_score = 0
+        if ema_bull:
+            buy_score += 2
+        if rsi_buy_zone:
+            buy_score += 2
+        if volume_confirmed:
+            buy_score += 1
+        if strong_volume:
+            buy_score += 1
+        if strong_adx:
+            buy_score += 1
+        if trend_4h == "BULLISH":
+            buy_score += 1
+        elif trend_4h == "BEARISH":
+            buy_score -= 2  # مخالفت صریح روند بزرگ، جریمه سنگین
+        if trend_1h == "BULLISH":
+            buy_score += 1
+        elif trend_1h == "BEARISH":
+            buy_score -= 1
+
+        # --- امتیازدهی سمت فروش (قرینه) ---
+        sell_score = 0
+        if ema_bear:
+            sell_score += 2
+        if rsi_sell_zone:
+            sell_score += 2
+        if volume_confirmed:
+            sell_score += 1
+        if strong_volume:
+            sell_score += 1
+        if strong_adx:
+            sell_score += 1
+        if trend_4h == "BEARISH":
+            sell_score += 1
+        elif trend_4h == "BULLISH":
+            sell_score -= 2
+        if trend_1h == "BEARISH":
+            sell_score += 1
+        elif trend_1h == "BULLISH":
+            sell_score -= 1
+
+        # حداقل امتیاز برای صدور سیگنال از ۸ ممکن؛ یعنی حدود ۶۰٪ عوامل باید هم‌جهت باشن
+        MIN_SCORE = 5
+
+        logger.info(f"[SCORE] buy={buy_score} sell={sell_score} (آستانه={MIN_SCORE}) rsi={latest['rsi']:.1f} adx={latest['adx']:.1f}")
+
+        if buy_score >= MIN_SCORE and buy_score > sell_score:
+            return "BUY"
+        if sell_score >= MIN_SCORE and sell_score > buy_score:
+            return "SELL"
 
         return None
 
