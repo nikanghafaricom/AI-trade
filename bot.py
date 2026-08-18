@@ -54,7 +54,7 @@ class Config:
 
     AI_API_KEY = os.getenv("AI_API_KEY")
     AI_BASE_URL = os.getenv("AI_BASE_URL", "https://api.groq.com/openai/v1")
-    AI_MODEL = os.getenv("AI_MODEL", "llama-3.3-70b-versatile")
+    AI_MODEL = os.getenv("AI_MODEL", "openai/gpt-oss-120b")
 
     TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
     TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
