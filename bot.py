@@ -1,5 +1,5 @@
 # ==============================================
-# Hybrid Signal Bot - (V5.1 Auto-Proxy Iran Edition)
+# Hybrid Signal Bot - نسخه جامع (V5 Ultimate Pro - Live Spot Pure Tech Edition)
 # ==============================================
 import os
 import time
@@ -7,7 +7,6 @@ import logging
 import requests
 import gc
 import json
-import re
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timedelta
@@ -18,13 +17,13 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ==================== وب‌سرور جهت نگه داشتن زنده Render ====================
+# ==================== وب‌سرور استاندارد ====================
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "text/html; charset=utf-8")
         self.end_headers()
-        self.wfile.write(b"Bot is alive and proxy engine is active!")
+        self.wfile.write(b"Bot is alive and running!")
 
     def do_HEAD(self):
         self.send_response(200)
@@ -46,7 +45,7 @@ threading.Thread(target=start_health_check_server, daemon=True).start()
 
 # ==================== تنظیمات ====================
 class Config:
-    EXCHANGE_ID = os.getenv("EXCHANGE_ID", "tabdil")
+    EXCHANGE_ID = os.getenv("EXCHANGE_ID", "tabdil") # تنظیم صرافی (Default: tabdil / coinex)
     API_KEY = os.getenv("EXCHANGE_API_KEY", "")
     SECRET = os.getenv("EXCHANGE_SECRET", "")
     PASSWORD = os.getenv("EXCHANGE_PASSWORD", "")
@@ -71,7 +70,9 @@ class Config:
     ENTRY_TIMEFRAME = "15m"
     TREND_TIMEFRAME = "4h"
     CHECK_INTERVAL = 300
-    MAX_CONCURRENT_TRADES = 4
+
+    # تنظیمات مدیریت سرمایه معاملات واقعی (بدون اهرم)
+    MAX_CONCURRENT_TRADES = 4  # کل موجودی بین ۴ معامله تقسیم می‌شود
 
     def validate(self):
         required = {
@@ -95,73 +96,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ==================== ماژول هوشمند دریافت و تست خودکار پروکسی ایران ====================
-class AutoProxyManager:
-    def __init__(self):
-        self.working_proxy: Optional[Dict[str, str]] = None
-        self.last_update = datetime.min
-
-    def fetch_iran_proxies(self) -> List[str]:
-        """استخراج پروکسی‌های ایران از منابع رایگان عمومی"""
-        proxies = []
-        sources = [
-            "https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=10000&country=IR&ssl=all&anonymity=all",
-            "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt",
-            "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt"
-        ]
-        
-        for url in sources:
-            try:
-                res = requests.get(url, timeout=5)
-                if res.status_code == 200:
-                    found = re.findall(r'\b(?:\d{1,3}\.){3}\d{1,3}:\d+\b', res.text)
-                    proxies.extend(found)
-            except Exception:
-                continue
-                
-        return list(set(proxies))
-
-    def test_proxy(self, proxy_address: str) -> bool:
-        """تست اینکه آیا پروکسی می‌تواند به API تبدیل وصل شود یا خیر"""
-        proxy_dict = {
-            "http": f"http://{proxy_address}",
-            "https": f"http://{proxy_address}"
-        }
-        try:
-            # ارسال یک درخواست سریع به صرافی تبدیل برای سنجش اتصال
-            res = requests.get("https://api.tabdil.org/p2p/v1/ticker?symbol=BTC_USDT", proxies=proxy_dict, timeout=4)
-            return res.status_code == 200
-        except Exception:
-            return False
-
-    def get_valid_proxy(self, force_refresh=False) -> Optional[Dict[str, str]]:
-        """دریافت پروکسی سالم (با قابلیت رفرش خودکار)"""
-        now = datetime.now()
-        
-        # اگر پروکسی موجود است و کمتر از ۱ ساعت گذشته، از همان استفاده کن
-        if self.working_proxy and not force_refresh and (now - self.last_update < timedelta(hours=1)):
-            return self.working_proxy
-
-        logger.info("🔍 در حال جستجو و پیدا کردن پروکسی جدید ایران...")
-        proxy_candidates = self.fetch_iran_proxies()
-        
-        for proxy_str in proxy_candidates:
-            if self.test_proxy(proxy_str):
-                logger.info(f"✅ پروکسی سالم ایران پیدا شد: {proxy_str}")
-                self.working_proxy = {
-                    "http": f"http://{proxy_str}",
-                    "https": f"http://{proxy_str}"
-                }
-                self.last_update = now
-                return self.working_proxy
-
-        logger.warning("⚠️ هیچ پروکسی رایگان سالمی در این لحظه پیدا نشد. سیستم بدون پروکسی تلاش خواهد کرد.")
-        self.working_proxy = None
-        return None
-
-proxy_manager = AutoProxyManager()
-
-# ==================== کلاس API صرافی تبدیل (با پروکسی خودکار) ====================
+# ==================== کلاس اختصاصی API صرافی تبدیل ====================
 class TabdilExchange:
     def __init__(self, api_key: str, secret: str):
         self.api_key = api_key
@@ -175,22 +110,39 @@ class TabdilExchange:
     def _symbol_transform(self, symbol: str) -> str:
         return symbol.replace("/", "_")
 
-    def _make_request(self, method: str, url: str, **kwargs) -> requests.Response:
-        """ارسال درخواست با مدیریت خودکار خطای پروکسی"""
-        proxies = proxy_manager.get_valid_proxy()
-        try:
-            res = requests.request(method, url, headers=self.headers, proxies=proxies, timeout=10, **kwargs)
-            return res
-        except Exception as e:
-            logger.warning(f"خطای ارتباط با پروکسی فعلی ({e}). تلاش مجدد برای تعویض پروکسی...")
-            # در صورت بروز خطا، پروکسی اجباراً رفرش و تعویض می‌شود
-            new_proxies = proxy_manager.get_valid_proxy(force_refresh=True)
-            return requests.request(method, url, headers=self.headers, proxies=new_proxies, timeout=10, **kwargs)
+    def fetch_ohlcv(self, symbol: str, timeframe: str = "15m", limit: int = 100) -> list:
+        tf_map = {"1m": "1m", "5m": "5m", "15m": "15m", "1h": "1h", "4h": "4h", "1d": "1d"}
+        tabdil_tf = tf_map.get(timeframe, "15m")
+        market = self._symbol_transform(symbol)
+        
+        url = f"{self.base_url}/p2p/v1/udf/history?symbol={market}&resolution={tabdil_tf}&limit={limit}"
+        response = requests.get(url, timeout=10)
+        data = response.json()
+        
+        ohlcv = []
+        if response.status_code == 200 and data.get("s") == "ok":
+            times = data.get("t", [])
+            opens = data.get("o", [])
+            highs = data.get("h", [])
+            lows = data.get("l", [])
+            closes = data.get("c", [])
+            volumes = data.get("v", [])
+            
+            for i in range(len(times)):
+                ohlcv.append([
+                    times[i] * 1000,
+                    float(opens[i]),
+                    float(highs[i]),
+                    float(lows[i]),
+                    float(closes[i]),
+                    float(volumes[i])
+                ])
+        return ohlcv
 
     def fetch_balance(self) -> dict:
         url = f"{self.base_url}/p2p/v1/user/balances"
         try:
-            res = self._make_request("GET", url)
+            res = requests.get(url, headers=self.headers, timeout=10)
             data = res.json()
             balances = {"USDT": {"free": 0.0, "total": 0.0}, "total": {}}
             if res.status_code == 200 and "data" in data:
@@ -210,13 +162,10 @@ class TabdilExchange:
     def fetch_ticker(self, symbol: str) -> dict:
         market = self._symbol_transform(symbol)
         url = f"{self.base_url}/p2p/v1/ticker?symbol={market}"
-        try:
-            res = self._make_request("GET", url)
-            data = res.json()
-            last_price = float(data.get("lastPrice", 0)) if res.status_code == 200 else 0.0
-            return {"last": last_price}
-        except Exception:
-            return {"last": 0.0}
+        res = requests.get(url, timeout=10)
+        data = res.json()
+        last_price = float(data.get("lastPrice", 0)) if res.status_code == 200 else 0.0
+        return {"last": last_price}
 
     def create_market_buy_order(self, symbol: str, amount: float) -> dict:
         market = self._symbol_transform(symbol)
@@ -227,7 +176,7 @@ class TabdilExchange:
             "type": "MARKET",
             "quantity": amount
         }
-        res = self._make_request("POST", url, json=payload)
+        res = requests.post(url, json=payload, headers=self.headers, timeout=10)
         data = res.json()
         ticker = self.fetch_ticker(symbol)
         return {
@@ -245,7 +194,7 @@ class TabdilExchange:
             "type": "MARKET",
             "quantity": amount
         }
-        res = self._make_request("POST", url, json=payload)
+        res = requests.post(url, json=payload, headers=self.headers, timeout=10)
         data = res.json()
         return {"status": "closed", "raw": data}
 
@@ -253,9 +202,8 @@ class TabdilExchange:
 class DataLayer:
     def __init__(self, config: Config):
         self.config = config
-        self.market_data_exchange = ccxt.coinex({'enableRateLimit': True})
-        
         exchange_id = config.EXCHANGE_ID.lower()
+
         if exchange_id == "tabdil":
             self.exchange = TabdilExchange(config.API_KEY, config.SECRET)
         else:
@@ -269,7 +217,7 @@ class DataLayer:
             })
 
     def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 100) -> pd.DataFrame:
-        ohlcv = self.market_data_exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+        ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         return df
@@ -343,7 +291,7 @@ class SignalEngine:
 
         return None
 
-# ==================== ماژول معامله واقعی اسپات ====================
+# ==================== ماژول معامله واقعی اسپات (Live Spot Trader) ====================
 class LiveSpotTrader:
     def __init__(self, config: Config, data_layer: DataLayer, telegram_sender):
         self.config = config
@@ -634,8 +582,8 @@ class HybridTradingSystem:
         self.live_trader.update_and_check_trades()
 
     def start(self):
-        logger.info("بات V5.1 Auto-Proxy فعال شد")
-        start_message = "⚡️ **نسخه V5.1 Auto-Proxy فعال شد.**\n\nربات به‌صورت خودکار پروکسی‌های سالم ایران را شناسایی کرده و ارتباط با صرافی تبدیل را برقرار می‌سازد."
+        logger.info("بات V5 Ultimate Pro با معاملات واقعی فعال شد")
+        start_message = "⚡️ **نسخه جامع V5 Ultimate Pro فعال شد.**\n\nربات به API واقعی صرافی متصل شد و معاملات به‌صورت Spot و خالص تکنیکال اجرا خواهند شد."
         self.telegram.send_system_status(start_message)
 
         while self.running:
