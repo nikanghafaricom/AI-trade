@@ -96,18 +96,125 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ==================== کلاس اختصاصی API صرافی تبدیل ====================
+class TabdilExchange:
+    def __init__(self, api_key: str, secret: str):
+        self.api_key = api_key
+        self.secret = secret
+        self.base_url = "https://api.tabdil.org"
+        self.headers = {
+            "X-API-KEY": self.api_key,
+            "Content-Type": "application/json"
+        }
+
+    def _symbol_transform(self, symbol: str) -> str:
+        return symbol.replace("/", "_")
+
+    def fetch_ohlcv(self, symbol: str, timeframe: str = "15m", limit: int = 100) -> list:
+        tf_map = {"1m": "1m", "5m": "5m", "15m": "15m", "1h": "1h", "4h": "4h", "1d": "1d"}
+        tabdil_tf = tf_map.get(timeframe, "15m")
+        market = self._symbol_transform(symbol)
+        
+        url = f"{self.base_url}/p2p/v1/udf/history?symbol={market}&resolution={tabdil_tf}&limit={limit}"
+        response = requests.get(url, timeout=10)
+        data = response.json()
+        
+        ohlcv = []
+        if response.status_code == 200 and data.get("s") == "ok":
+            times = data.get("t", [])
+            opens = data.get("o", [])
+            highs = data.get("h", [])
+            lows = data.get("l", [])
+            closes = data.get("c", [])
+            volumes = data.get("v", [])
+            
+            for i in range(len(times)):
+                ohlcv.append([
+                    times[i] * 1000,
+                    float(opens[i]),
+                    float(highs[i]),
+                    float(lows[i]),
+                    float(closes[i]),
+                    float(volumes[i])
+                ])
+        return ohlcv
+
+    def fetch_balance(self) -> dict:
+        url = f"{self.base_url}/p2p/v1/user/balances"
+        try:
+            res = requests.get(url, headers=self.headers, timeout=10)
+            data = res.json()
+            balances = {"USDT": {"free": 0.0, "total": 0.0}, "total": {}}
+            if res.status_code == 200 and "data" in data:
+                for item in data["data"]:
+                    asset = item.get("asset")
+                    free = float(item.get("free", 0))
+                    locked = float(item.get("locked", 0))
+                    total = free + locked
+                    balances["total"][asset] = total
+                    if asset == "USDT":
+                        balances["USDT"] = {"free": free, "total": total}
+            return balances
+        except Exception as e:
+            logger.error(f"خطا در دریافت موجودی تبدیل: {e}")
+            return {"USDT": {"free": 0.0, "total": 0.0}, "total": {}}
+
+    def fetch_ticker(self, symbol: str) -> dict:
+        market = self._symbol_transform(symbol)
+        url = f"{self.base_url}/p2p/v1/ticker?symbol={market}"
+        res = requests.get(url, timeout=10)
+        data = res.json()
+        last_price = float(data.get("lastPrice", 0)) if res.status_code == 200 else 0.0
+        return {"last": last_price}
+
+    def create_market_buy_order(self, symbol: str, amount: float) -> dict:
+        market = self._symbol_transform(symbol)
+        url = f"{self.base_url}/p2p/v1/order"
+        payload = {
+            "symbol": market,
+            "side": "BUY",
+            "type": "MARKET",
+            "quantity": amount
+        }
+        res = requests.post(url, json=payload, headers=self.headers, timeout=10)
+        data = res.json()
+        ticker = self.fetch_ticker(symbol)
+        return {
+            "average": ticker.get("last", 0),
+            "filled": amount,
+            "raw": data
+        }
+
+    def create_market_sell_order(self, symbol: str, amount: float) -> dict:
+        market = self._symbol_transform(symbol)
+        url = f"{self.base_url}/p2p/v1/order"
+        payload = {
+            "symbol": market,
+            "side": "SELL",
+            "type": "MARKET",
+            "quantity": amount
+        }
+        res = requests.post(url, json=payload, headers=self.headers, timeout=10)
+        data = res.json()
+        return {"status": "closed", "raw": data}
+
 # ==================== لایه داده ====================
 class DataLayer:
     def __init__(self, config: Config):
         self.config = config
-        exchange_class = getattr(ccxt, config.EXCHANGE_ID)
-        self.exchange = exchange_class({
-            'apiKey': config.API_KEY,
-            'secret': config.SECRET,
-            'password': config.PASSWORD,
-            'enableRateLimit': True,
-            'options': {'defaultType': 'spot'}
-        })
+        exchange_id = config.EXCHANGE_ID.lower()
+
+        if exchange_id == "tabdil":
+            self.exchange = TabdilExchange(config.API_KEY, config.SECRET)
+        else:
+            exchange_class = getattr(ccxt, exchange_id)
+            self.exchange = exchange_class({
+                'apiKey': config.API_KEY,
+                'secret': config.SECRET,
+                'password': config.PASSWORD,
+                'enableRateLimit': True,
+                'options': {'defaultType': 'spot'}
+            })
 
     def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 100) -> pd.DataFrame:
         ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
@@ -231,7 +338,6 @@ class LiveSpotTrader:
             return 0.0
 
     def open_real_trade(self, symbol: str, side: str, entry_price: float, tp1: float, tp2: float, tp3: float, sl: float):
-        # چون معاملات بدون اهرم (Spot) است، معامله واقعی فقط برای پوزیشن BUY فعال می‌شود
         if side != "BUY":
             logger.info(f"سیگنال {side} برای {symbol} به دلیل Spot بودن سیستم نادیده گرفته شد (بدون اهرم).")
             return
@@ -239,7 +345,7 @@ class LiveSpotTrader:
         free_usdt = self._get_usdt_balance()
         allocated_usdt = free_usdt / self.config.MAX_CONCURRENT_TRADES
 
-        if allocated_usdt < 5.0: # حداقل مقدار معامله استاندارد در صرافی‌ها
+        if allocated_usdt < 5.0:
             logger.warning(f"موجودی کافی برای ورود به معامله واقعی نیست: {allocated_usdt:.2f} USDT")
             return
 
@@ -280,12 +386,10 @@ class LiveSpotTrader:
                 is_close = False
                 close_price = entry
 
-                # ۱. بررسی حد زیان (Stop-Loss)
                 if latest_low <= trade['sl']:
                     is_close = True
                     close_price = trade['sl']
 
-                # ۲. بررسی حد سود اول (Take-Profit 1)
                 elif latest_high >= trade['tp1']:
                     is_close = True
                     close_price = trade['tp1']
