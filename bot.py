@@ -110,35 +110,6 @@ class TabdilExchange:
     def _symbol_transform(self, symbol: str) -> str:
         return symbol.replace("/", "_")
 
-    def fetch_ohlcv(self, symbol: str, timeframe: str = "15m", limit: int = 100) -> list:
-        tf_map = {"1m": "1m", "5m": "5m", "15m": "15m", "1h": "1h", "4h": "4h", "1d": "1d"}
-        tabdil_tf = tf_map.get(timeframe, "15m")
-        market = self._symbol_transform(symbol)
-        
-        url = f"{self.base_url}/p2p/v1/udf/history?symbol={market}&resolution={tabdil_tf}&limit={limit}"
-        response = requests.get(url, timeout=10)
-        data = response.json()
-        
-        ohlcv = []
-        if response.status_code == 200 and data.get("s") == "ok":
-            times = data.get("t", [])
-            opens = data.get("o", [])
-            highs = data.get("h", [])
-            lows = data.get("l", [])
-            closes = data.get("c", [])
-            volumes = data.get("v", [])
-            
-            for i in range(len(times)):
-                ohlcv.append([
-                    times[i] * 1000,
-                    float(opens[i]),
-                    float(highs[i]),
-                    float(lows[i]),
-                    float(closes[i]),
-                    float(volumes[i])
-                ])
-        return ohlcv
-
     def fetch_balance(self) -> dict:
         url = f"{self.base_url}/p2p/v1/user/balances"
         try:
@@ -198,12 +169,14 @@ class TabdilExchange:
         data = res.json()
         return {"status": "closed", "raw": data}
 
-# ==================== لایه داده ====================
+# ==================== لایه داده (ترکیب دیتای جهانی و ثبت معامله در تبدیل) ====================
 class DataLayer:
     def __init__(self, config: Config):
         self.config = config
+        # دریافت داده‌های کندل از صرافی بدون تحریم جهت پایداری در Render
+        self.market_data_exchange = ccxt.coinex({'enableRateLimit': True})
+        
         exchange_id = config.EXCHANGE_ID.lower()
-
         if exchange_id == "tabdil":
             self.exchange = TabdilExchange(config.API_KEY, config.SECRET)
         else:
@@ -217,7 +190,7 @@ class DataLayer:
             })
 
     def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 100) -> pd.DataFrame:
-        ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+        ohlcv = self.market_data_exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         return df
