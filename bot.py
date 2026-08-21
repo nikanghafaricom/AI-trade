@@ -1,5 +1,5 @@
 # ==============================================
-# Hybrid Signal Bot - نسخه جامع (V5 Ultimate Pro)
+# Hybrid Signal Bot - نسخه جامع (V5 Ultimate Pro - Live Spot Pure Tech Edition)
 # ==============================================
 import os
 import time
@@ -13,7 +13,6 @@ from datetime import datetime, timedelta
 from typing import Dict, Optional, List
 import pandas as pd
 import ccxt
-from openai import OpenAI
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -46,14 +45,10 @@ threading.Thread(target=start_health_check_server, daemon=True).start()
 
 # ==================== تنظیمات ====================
 class Config:
-    EXCHANGE_ID = "coinex"
+    EXCHANGE_ID = os.getenv("EXCHANGE_ID", "tabdil") # تنظیم صرافی (Default: tabdil / coinex)
     API_KEY = os.getenv("EXCHANGE_API_KEY", "")
     SECRET = os.getenv("EXCHANGE_SECRET", "")
     PASSWORD = os.getenv("EXCHANGE_PASSWORD", "")
-
-    AI_API_KEY = os.getenv("AI_API_KEY")
-    AI_BASE_URL = os.getenv("AI_BASE_URL", "https://api.x.ai/v1")
-    AI_MODEL = os.getenv("AI_MODEL", "grok-3")
 
     TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
     TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -75,13 +70,16 @@ class Config:
     ENTRY_TIMEFRAME = "15m"
     TREND_TIMEFRAME = "4h"
     CHECK_INTERVAL = 300
-    MIN_CONFIDENCE_AI = 0.80
+
+    # تنظیمات مدیریت سرمایه معاملات واقعی (بدون اهرم)
+    MAX_CONCURRENT_TRADES = 4  # کل موجودی بین ۴ معامله تقسیم می‌شود
 
     def validate(self):
         required = {
-            "AI_API_KEY": self.AI_API_KEY,
             "TELEGRAM_BOT_TOKEN": self.TELEGRAM_BOT_TOKEN,
             "TELEGRAM_CHAT_ID": self.TELEGRAM_CHAT_ID,
+            "EXCHANGE_API_KEY": self.API_KEY,
+            "EXCHANGE_SECRET": self.SECRET,
         }
         missing = [key for key, value in required.items() if not value]
         if missing:
@@ -106,6 +104,7 @@ class DataLayer:
         self.exchange = exchange_class({
             'apiKey': config.API_KEY,
             'secret': config.SECRET,
+            'password': config.PASSWORD,
             'enableRateLimit': True,
             'options': {'defaultType': 'spot'}
         })
@@ -120,10 +119,6 @@ class DataLayer:
 class AnalysisLayer:
     def __init__(self, config: Config):
         self.config = config
-        self.client = OpenAI(
-            api_key=config.AI_API_KEY,
-            base_url=config.AI_BASE_URL
-        )
 
     def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         df = df.copy()
@@ -158,41 +153,6 @@ class AnalysisLayer:
             return "BEARISH"
         return "NEUTRAL"
 
-    def get_ai_confirmation(self, symbol: str, side: str, df: pd.DataFrame, trend: str) -> Dict:
-        latest = df.iloc[-1]
-        prev = df.iloc[-2]
-
-        prompt = f"""
-You are an elite quantitative crypto trader.
-Context:
-- Symbol: {symbol}
-- Trade Side: {side}
-- Higher Timeframe (4H) Trend: {trend}
-- 15m Close: {latest['close']}
-- RSI: {latest['rsi']:.1f}
-- EMA20/50: {latest['ema_fast']:.2f} / {latest['ema_slow']:.2f}
-- ATR Volatility: {latest['atr']:.4f}
-- Volume ratio: {latest['volume']/latest['vol_sma']:.2f}x
-
-Assign a final score (60 to 95) evaluating if this signal matches high-probability criteria.
-Output ONLY the integer score.
-"""
-        try:
-            response = self.client.chat.completions.create(
-                model=self.config.AI_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.1,
-                max_tokens=6
-            )
-            answer = response.choices[0].message.content.strip()
-            score = float(''.join(filter(str.isdigit, answer))) / 100.0
-            if score < 0.60 or score > 0.98:
-                score = 0.82
-            return {"confidence": score}
-        except Exception as e:
-            logger.error(f"خطای AI برای {symbol}: {e}")
-            return {"confidence": 0.80}
-
 # ==================== موتور سیگنال ====================
 class SignalEngine:
     def __init__(self, config: Config):
@@ -224,12 +184,13 @@ class SignalEngine:
 
         return None
 
-# ==================== ماژول معامله مجازی (Paper Trading) ====================
-class PaperTrader:
-    def __init__(self, config: Config, telegram_sender):
+# ==================== ماژول معامله واقعی اسپات (Live Spot Trader) ====================
+class LiveSpotTrader:
+    def __init__(self, config: Config, data_layer: DataLayer, telegram_sender):
         self.config = config
+        self.data_layer = data_layer
         self.telegram = telegram_sender
-        self.file_path = "paper_trades.json"
+        self.file_path = "live_trades.json"
         self.active_trades = self._load_trades()
 
     def _load_trades(self) -> Dict:
@@ -245,75 +206,115 @@ class PaperTrader:
         with open(self.file_path, "w") as f:
             json.dump(self.active_trades, f, indent=4)
 
-    def open_virtual_trade(self, symbol: str, side: str, entry_price: float, tp1: float, tp2: float, tp3: float, sl: float):
-        trade_id = f"{symbol}_{int(time.time())}"
-        self.active_trades[trade_id] = {
-            "symbol": symbol,
-            "side": side,
-            "entry": entry_price,
-            "tp1": tp1,
-            "tp2": tp2,
-            "tp3": tp3,
-            "sl": sl,
-            "open_time": datetime.now().strftime('%Y-%m-%d %H:%M')
-        }
-        self._save_trades()
+    def _get_usdt_balance(self) -> float:
+        try:
+            balance = self.data_layer.exchange.fetch_balance()
+            return float(balance.get('USDT', {}).get('free', 0.0))
+        except Exception as e:
+            logger.error(f"خطا در دریافت موجودی صرافی: {e}")
+            return 0.0
 
-    def update_and_check_trades(self, data_layer: DataLayer):
+    def _get_total_balance_value(self) -> float:
+        try:
+            balance = self.data_layer.exchange.fetch_balance()
+            total_usdt = float(balance.get('USDT', {}).get('total', 0.0))
+            for currency, data in balance.get('total', {}).items():
+                if currency != 'USDT' and data > 0:
+                    try:
+                        ticker = self.data_layer.exchange.fetch_ticker(f"{currency}/USDT")
+                        total_usdt += data * ticker['last']
+                    except Exception:
+                        pass
+            return round(total_usdt, 2)
+        except Exception as e:
+            logger.error(f"خطا در دریافت کل دارایی: {e}")
+            return 0.0
+
+    def open_real_trade(self, symbol: str, side: str, entry_price: float, tp1: float, tp2: float, tp3: float, sl: float):
+        # چون معاملات بدون اهرم (Spot) است، معامله واقعی فقط برای پوزیشن BUY فعال می‌شود
+        if side != "BUY":
+            logger.info(f"سیگنال {side} برای {symbol} به دلیل Spot بودن سیستم نادیده گرفته شد (بدون اهرم).")
+            return
+
+        free_usdt = self._get_usdt_balance()
+        allocated_usdt = free_usdt / self.config.MAX_CONCURRENT_TRADES
+
+        if allocated_usdt < 5.0: # حداقل مقدار معامله استاندارد در صرافی‌ها
+            logger.warning(f"موجودی کافی برای ورود به معامله واقعی نیست: {allocated_usdt:.2f} USDT")
+            return
+
+        try:
+            amount = allocated_usdt / entry_price
+            order = self.data_layer.exchange.create_market_buy_order(symbol, amount)
+            executed_price = float(order.get('average', entry_price))
+            executed_amount = float(order.get('filled', amount))
+
+            trade_id = f"{symbol}_{int(time.time())}"
+            self.active_trades[trade_id] = {
+                "symbol": symbol,
+                "side": side,
+                "entry": executed_price,
+                "amount": executed_amount,
+                "allocated_usdt": allocated_usdt,
+                "tp1": tp1,
+                "tp2": tp2,
+                "tp3": tp3,
+                "sl": sl,
+                "open_time": datetime.now().strftime('%Y-%m-%d %H:%M')
+            }
+            self._save_trades()
+            logger.info(f"معامله واقعی اسپات ثبت شد: {symbol} | مقدار: {executed_amount}")
+        except Exception as e:
+            logger.error(f"خطا در ثبت سفارش خرید واقعی برای {symbol}: {e}")
+
+    def update_and_check_trades(self):
         for trade_id, trade in list(self.active_trades.items()):
             try:
-                df = data_layer.fetch_ohlcv(trade['symbol'], timeframe="1m", limit=5)
+                symbol = trade['symbol']
+                df = self.data_layer.fetch_ohlcv(symbol, timeframe="1m", limit=5)
                 latest_high = float(df['high'].max())
                 latest_low = float(df['low'].min())
-
-                symbol = trade['symbol']
-                side = trade['side']
                 entry = trade['entry']
+                amount = trade['amount']
 
-                # ----------------- بررسی پوزیشن خرید (BUY) -----------------
-                if side == "BUY":
-                    # ۱. حد زیان
-                    if latest_low <= trade['sl']:
-                        pnl = ((trade['sl'] - entry) / entry) * 100
-                        self._send_close_report(trade, pnl)
-                        del self.active_trades[trade_id]
-                        continue
+                is_close = False
+                close_price = entry
 
-                    # ۲. رسیدن به تارگت اول (خروج با سود)
-                    elif latest_high >= trade['tp1']:
-                        pnl = ((trade['tp1'] - entry) / entry) * 100
-                        self._send_close_report(trade, pnl)
-                        del self.active_trades[trade_id]
-                        continue
+                # ۱. بررسی حد زیان (Stop-Loss)
+                if latest_low <= trade['sl']:
+                    is_close = True
+                    close_price = trade['sl']
 
-                # ----------------- بررسی پوزیشن فروش (SELL) -----------------
-                elif side == "SELL":
-                    # ۱. حد زیان
-                    if latest_high >= trade['sl']:
-                        pnl = ((entry - trade['sl']) / entry) * 100
-                        self._send_close_report(trade, pnl)
-                        del self.active_trades[trade_id]
-                        continue
+                # ۲. بررسی حد سود اول (Take-Profit 1)
+                elif latest_high >= trade['tp1']:
+                    is_close = True
+                    close_price = trade['tp1']
 
-                    # ۲. رسیدن به تارگت اول (خروج با سود)
-                    elif latest_low <= trade['tp1']:
-                        pnl = ((entry - trade['tp1']) / entry) * 100
-                        self._send_close_report(trade, pnl)
-                        del self.active_trades[trade_id]
-                        continue
+                if is_close:
+                    try:
+                        self.data_layer.exchange.create_market_sell_order(symbol, amount)
+                    except Exception as order_err:
+                        logger.error(f"خطا در فروش سفارش مارکت {symbol}: {order_err}")
+
+                    pnl = ((close_price - entry) / entry) * 100
+                    total_balance = self._get_total_balance_value()
+                    
+                    self._send_close_report(trade, pnl, total_balance)
+                    del self.active_trades[trade_id]
 
             except Exception as e:
-                logger.error(f"خطا در بروزرسانی معامله مجازی {trade_id}: {e}")
+                logger.error(f"خطا در بروزرسانی معامله واقعی {trade_id}: {e}")
 
         self._save_trades()
 
-    def _send_close_report(self, trade: Dict, pnl: float):
+    def _send_close_report(self, trade: Dict, pnl: float, total_balance: float):
         emoji = "✅" if pnl > 0 else "❌"
         msg = f"""
-{emoji} **معامله بسته شد**
+{emoji} **معامله واقعی بسته شد**
 
-📌 **ارز:** {trade['symbol']} ({trade['side']})
-📈 **سود/زیان:** {pnl:+.2f}%
+📌 **ارز:** {trade['symbol']} (SPOT BUY)
+📈 **سود/زیان معامله:** {pnl:+.2f}%
+💰 **موجودی کل حساب (با سود/زیان):** {total_balance:,} USDT
 """
         self.telegram.send_personal_message(msg)
 
@@ -352,7 +353,7 @@ class TelegramSender:
         except Exception as e:
             logger.error(f"خطای ارسال پیام شخصی به تلگرام: {e}")
 
-    def send_signal(self, symbol: str, side: str, latest: pd.Series, confidence: float, trend_4h: str) -> Dict:
+    def send_signal(self, symbol: str, side: str, latest: pd.Series, trend_4h: str) -> Dict:
         emoji = "🟢" if side == "BUY" else "🔴"
         direction = "LONG" if side == "BUY" else "SHORT"
         price = float(latest['close'])
@@ -391,7 +392,7 @@ class TelegramSender:
 🛑 **Stop-Loss:** {stop_loss:,}
 ⚙️ **Trailing Stop Trigger:** Move SL to Entry at {trailing_step:,}
 
-📊 **Metrics:** RSI: {latest['rsi']:.1f} | AI Score: {confidence:.0%}
+📊 **Metrics:** RSI: {latest['rsi']:.1f}
 ⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}
 """
         try:
@@ -426,7 +427,7 @@ class HybridTradingSystem:
         self.analysis = AnalysisLayer(self.config)
         self.signal_engine = SignalEngine(self.config)
         self.telegram = TelegramSender(self.config)
-        self.paper_trader = PaperTrader(self.config, self.telegram)
+        self.live_trader = LiveSpotTrader(self.config, self.data, self.telegram)
         self.running = True
         self.last_signal_time: Dict[str, datetime] = {}
 
@@ -450,23 +451,20 @@ class HybridTradingSystem:
                     return
 
             latest = df_15m.iloc[-1]
-            ai_result = self.analysis.get_ai_confirmation(symbol, rule_signal, df_15m, trend_4h)
+            trade_data = self.telegram.send_signal(symbol, rule_signal, latest, trend_4h)
+            
+            if trade_data:
+                self.live_trader.open_real_trade(
+                    symbol=symbol,
+                    side=rule_signal,
+                    entry_price=trade_data["price"],
+                    tp1=trade_data["tp1"],
+                    tp2=trade_data["tp2"],
+                    tp3=trade_data["tp3"],
+                    sl=trade_data["sl"]
+                )
 
-            if ai_result["confidence"] >= self.config.MIN_CONFIDENCE_AI:
-                trade_data = self.telegram.send_signal(symbol, rule_signal, latest, ai_result["confidence"], trend_4h)
-                
-                if trade_data:
-                    self.paper_trader.open_virtual_trade(
-                        symbol=symbol,
-                        side=rule_signal,
-                        entry_price=trade_data["price"],
-                        tp1=trade_data["tp1"],
-                        tp2=trade_data["tp2"],
-                        tp3=trade_data["tp3"],
-                        sl=trade_data["sl"]
-                    )
-
-                self.last_signal_time[symbol] = now
+            self.last_signal_time[symbol] = now
 
         except Exception as e:
             logger.error(f"خطا در پردازش {symbol}: {e}")
@@ -477,11 +475,11 @@ class HybridTradingSystem:
             self.process_symbol(symbol)
             time.sleep(1.5)
             
-        self.paper_trader.update_and_check_trades(self.data)
+        self.live_trader.update_and_check_trades()
 
     def start(self):
-        logger.info("بات V5 Ultimate Pro فعال شد")
-        start_message = "⚡️ **نسخه جامع V5 Ultimate Pro فعال شد.**\n\nسیستم با تحلیل چند تایم‌فریم (MTF) و تریلینگ استاپ آماده‌سازی شد."
+        logger.info("بات V5 Ultimate Pro با معاملات واقعی فعال شد")
+        start_message = "⚡️ **نسخه جامع V5 Ultimate Pro فعال شد.**\n\nربات به API واقعی صرافی متصل شد و معاملات به‌صورت Spot و خالص تکنیکال اجرا خواهند شد."
         self.telegram.send_system_status(start_message)
 
         while self.running:
