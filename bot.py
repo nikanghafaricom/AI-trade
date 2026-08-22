@@ -174,13 +174,15 @@ class TabdilExchange:
 class DataLayer:
     def __init__(self, config: Config):
         self.config = config
-        # صرافی کمکی برای گرفتن بدون خطای کندل‌ها
         exchange_class = getattr(ccxt, config.DATA_EXCHANGE_ID)
         self.data_exchange = exchange_class({
             'enableRateLimit': True,
-            'options': {'defaultType': 'spot'}
+            'options': {'defaultType': 'spot'},
+            'timeout': 30000,
+            'headers': {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
         })
-        # صرافی اصلی برای معاملات
         self.trade_exchange = TabdilExchange(config.API_KEY, config.SECRET)
 
     def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 100) -> pd.DataFrame:
