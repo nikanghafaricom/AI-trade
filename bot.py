@@ -1,5 +1,5 @@
 # ==============================================
-# Hybrid Signal Bot - نسخه جامع (V5 Ultimate Pro - Live Spot Pure Tech Edition)
+# Hybrid Signal Bot - نسخه ترکیبی (CCXT Data + Tabdeal Execution)
 # ==============================================
 import os
 import time
@@ -45,7 +45,10 @@ threading.Thread(target=start_health_check_server, daemon=True).start()
 
 # ==================== تنظیمات ====================
 class Config:
-    EXCHANGE_ID = os.getenv("EXCHANGE_ID", "tabdil") # تنظیم صرافی (Default: tabdil / coinex)
+    # داده‌ها از کوینکس یا بایننس گرفته می‌شود تا خطا ندهد
+    DATA_EXCHANGE_ID = os.getenv("DATA_EXCHANGE_ID", "coinex")
+    
+    # معامله روی صرافی تبدیل انجام می‌شود
     API_KEY = os.getenv("EXCHANGE_API_KEY", "")
     SECRET = os.getenv("EXCHANGE_SECRET", "")
     PASSWORD = os.getenv("EXCHANGE_PASSWORD", "")
@@ -70,9 +73,7 @@ class Config:
     ENTRY_TIMEFRAME = "15m"
     TREND_TIMEFRAME = "4h"
     CHECK_INTERVAL = 300
-
-    # تنظیمات مدیریت سرمایه معاملات واقعی (بدون اهرم)
-    MAX_CONCURRENT_TRADES = 4  # کل موجودی بین ۴ معامله تقسیم می‌شود
+    MAX_CONCURRENT_TRADES = 4
 
     def validate(self):
         required = {
@@ -96,7 +97,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ==================== کلاس اختصاصی API صرافی تبدیل ====================
+# ==================== کلاس صرافی تبدیل (فقط برای معامله و موجودی) ====================
 class TabdilExchange:
     def __init__(self, api_key: str, secret: str):
         self.api_key = api_key
@@ -109,35 +110,6 @@ class TabdilExchange:
 
     def _symbol_transform(self, symbol: str) -> str:
         return symbol.replace("/", "_")
-
-    def fetch_ohlcv(self, symbol: str, timeframe: str = "15m", limit: int = 100) -> list:
-        tf_map = {"1m": "1m", "5m": "5m", "15m": "15m", "1h": "1h", "4h": "4h", "1d": "1d"}
-        tabdil_tf = tf_map.get(timeframe, "15m")
-        market = self._symbol_transform(symbol)
-        
-        url = f"{self.base_url}/p2p/v1/udf/history?symbol={market}&resolution={tabdil_tf}&limit={limit}"
-        response = requests.get(url, timeout=10)
-        data = response.json()
-        
-        ohlcv = []
-        if response.status_code == 200 and data.get("s") == "ok":
-            times = data.get("t", [])
-            opens = data.get("o", [])
-            highs = data.get("h", [])
-            lows = data.get("l", [])
-            closes = data.get("c", [])
-            volumes = data.get("v", [])
-            
-            for i in range(len(times)):
-                ohlcv.append([
-                    times[i] * 1000,
-                    float(opens[i]),
-                    float(highs[i]),
-                    float(lows[i]),
-                    float(closes[i]),
-                    float(volumes[i])
-                ])
-        return ohlcv
 
     def fetch_balance(self) -> dict:
         url = f"{self.base_url}/p2p/v1/user/balances"
@@ -198,26 +170,21 @@ class TabdilExchange:
         data = res.json()
         return {"status": "closed", "raw": data}
 
-# ==================== لایه داده ====================
+# ==================== لایه داده (استفاده از CCXT برای کندل‌ها) ====================
 class DataLayer:
     def __init__(self, config: Config):
         self.config = config
-        exchange_id = config.EXCHANGE_ID.lower()
-
-        if exchange_id == "tabdil":
-            self.exchange = TabdilExchange(config.API_KEY, config.SECRET)
-        else:
-            exchange_class = getattr(ccxt, exchange_id)
-            self.exchange = exchange_class({
-                'apiKey': config.API_KEY,
-                'secret': config.SECRET,
-                'password': config.PASSWORD,
-                'enableRateLimit': True,
-                'options': {'defaultType': 'spot'}
-            })
+        # صرافی کمکی برای گرفتن بدون خطای کندل‌ها
+        exchange_class = getattr(ccxt, config.DATA_EXCHANGE_ID)
+        self.data_exchange = exchange_class({
+            'enableRateLimit': True,
+            'options': {'defaultType': 'spot'}
+        })
+        # صرافی اصلی برای معاملات
+        self.trade_exchange = TabdilExchange(config.API_KEY, config.SECRET)
 
     def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 100) -> pd.DataFrame:
-        ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+        ohlcv = self.data_exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         return df
@@ -229,7 +196,6 @@ class AnalysisLayer:
 
     def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         df = df.copy()
-        
         delta = df['close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
@@ -291,7 +257,7 @@ class SignalEngine:
 
         return None
 
-# ==================== ماژول معامله واقعی اسپات (Live Spot Trader) ====================
+# ==================== ماژول معامله واقعی اسپات ====================
 class LiveSpotTrader:
     def __init__(self, config: Config, data_layer: DataLayer, telegram_sender):
         self.config = config
@@ -315,20 +281,20 @@ class LiveSpotTrader:
 
     def _get_usdt_balance(self) -> float:
         try:
-            balance = self.data_layer.exchange.fetch_balance()
+            balance = self.data_layer.trade_exchange.fetch_balance()
             return float(balance.get('USDT', {}).get('free', 0.0))
         except Exception as e:
-            logger.error(f"خطا در دریافت موجودی صرافی: {e}")
+            logger.error(f"خطا در دریافت موجودی صرافی تبدیل: {e}")
             return 0.0
 
     def _get_total_balance_value(self) -> float:
         try:
-            balance = self.data_layer.exchange.fetch_balance()
+            balance = self.data_layer.trade_exchange.fetch_balance()
             total_usdt = float(balance.get('USDT', {}).get('total', 0.0))
             for currency, data in balance.get('total', {}).items():
                 if currency != 'USDT' and data > 0:
                     try:
-                        ticker = self.data_layer.exchange.fetch_ticker(f"{currency}/USDT")
+                        ticker = self.data_layer.trade_exchange.fetch_ticker(f"{currency}/USDT")
                         total_usdt += data * ticker['last']
                     except Exception:
                         pass
@@ -339,19 +305,18 @@ class LiveSpotTrader:
 
     def open_real_trade(self, symbol: str, side: str, entry_price: float, tp1: float, tp2: float, tp3: float, sl: float):
         if side != "BUY":
-            logger.info(f"سیگنال {side} برای {symbol} به دلیل Spot بودن سیستم نادیده گرفته شد (بدون اهرم).")
             return
 
         free_usdt = self._get_usdt_balance()
         allocated_usdt = free_usdt / self.config.MAX_CONCURRENT_TRADES
 
         if allocated_usdt < 5.0:
-            logger.warning(f"موجودی کافی برای ورود به معامله واقعی نیست: {allocated_usdt:.2f} USDT")
+            logger.warning(f"موجودی کافی نیست: {allocated_usdt:.2f} USDT")
             return
 
         try:
             amount = allocated_usdt / entry_price
-            order = self.data_layer.exchange.create_market_buy_order(symbol, amount)
+            order = self.data_layer.trade_exchange.create_market_buy_order(symbol, amount)
             executed_price = float(order.get('average', entry_price))
             executed_amount = float(order.get('filled', amount))
 
@@ -369,7 +334,7 @@ class LiveSpotTrader:
                 "open_time": datetime.now().strftime('%Y-%m-%d %H:%M')
             }
             self._save_trades()
-            logger.info(f"معامله واقعی اسپات ثبت شد: {symbol} | مقدار: {executed_amount}")
+            logger.info(f"معامله واقعی ثبت شد: {symbol}")
         except Exception as e:
             logger.error(f"خطا در ثبت سفارش خرید واقعی برای {symbol}: {e}")
 
@@ -389,25 +354,23 @@ class LiveSpotTrader:
                 if latest_low <= trade['sl']:
                     is_close = True
                     close_price = trade['sl']
-
                 elif latest_high >= trade['tp1']:
                     is_close = True
                     close_price = trade['tp1']
 
                 if is_close:
                     try:
-                        self.data_layer.exchange.create_market_sell_order(symbol, amount)
+                        self.data_layer.trade_exchange.create_market_sell_order(symbol, amount)
                     except Exception as order_err:
-                        logger.error(f"خطا در فروش سفارش مارکت {symbol}: {order_err}")
+                        logger.error(f"خطا در فروش مارکت {symbol}: {order_err}")
 
                     pnl = ((close_price - entry) / entry) * 100
                     total_balance = self._get_total_balance_value()
-                    
                     self._send_close_report(trade, pnl, total_balance)
                     del self.active_trades[trade_id]
 
             except Exception as e:
-                logger.error(f"خطا در بروزرسانی معامله واقعی {trade_id}: {e}")
+                logger.error(f"خطا در بروزرسانی معامله {trade_id}: {e}")
 
         self._save_trades()
 
@@ -417,8 +380,8 @@ class LiveSpotTrader:
 {emoji} **معامله واقعی بسته شد**
 
 📌 **ارز:** {trade['symbol']} (SPOT BUY)
-📈 **سود/زیان معامله:** {pnl:+.2f}%
-💰 **موجودی کل حساب (با سود/زیان):** {total_balance:,} USDT
+📈 **سود/زیان:** {pnl:+.2f}%
+💰 **موجودی کل حساب:** {total_balance:,} USDT
 """
         self.telegram.send_personal_message(msg)
 
@@ -455,7 +418,7 @@ class TelegramSender:
                 timeout=10
             )
         except Exception as e:
-            logger.error(f"خطای ارسال پیام شخصی به تلگرام: {e}")
+            logger.error(f"خطای ارسال پیام شخصی: {e}")
 
     def send_signal(self, symbol: str, side: str, latest: pd.Series, trend_4h: str) -> Dict:
         emoji = "🟢" if side == "BUY" else "🔴"
@@ -470,7 +433,6 @@ class TelegramSender:
             tp2 = round(price + (2.5 * risk), 4)
             tp3 = round(price + (4.2 * risk), 4)
             stop_loss = round(stop_loss, 4)
-            trailing_step = round(price + (1.0 * risk), 4)
         else:
             stop_loss = max(float(latest['resistance']), price + (1.3 * atr))
             risk = stop_loss - price
@@ -478,7 +440,6 @@ class TelegramSender:
             tp2 = round(price - (2.5 * risk), 4)
             tp3 = round(price - (4.2 * risk), 4)
             stop_loss = round(stop_loss, 4)
-            trailing_step = round(price - (1.0 * risk), 4)
 
         message = f"""
 {emoji} **ULTRA SIGNAL: {side} / {direction}**
@@ -491,12 +452,10 @@ class TelegramSender:
 🎯 **Dynamic Targets:**
   1️⃣ TP1: {tp1:,}
   2️⃣ TP2: {tp2:,}
-  3️⃣ TP3 (Max Yield): {tp3:,}
+  3️⃣ TP3: {tp3:,}
 
 🛑 **Stop-Loss:** {stop_loss:,}
-⚙️ **Trailing Stop Trigger:** Move SL to Entry at {trailing_step:,}
-
-📊 **Metrics:** RSI: {latest['rsi']:.1f}
+📊 **RSI:** {latest['rsi']:.1f}
 ⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}
 """
         try:
@@ -509,15 +468,7 @@ class TelegramSender:
                 },
                 timeout=10
             )
-            logger.info(f"سیگنال فوق‌پیشرفته {side} برای {symbol} ارسال شد")
-            
-            return {
-                "price": price,
-                "tp1": tp1,
-                "tp2": tp2,
-                "tp3": tp3,
-                "sl": stop_loss
-            }
+            return {"price": price, "tp1": tp1, "tp2": tp2, "tp3": tp3, "sl": stop_loss}
         except Exception as e:
             logger.error(f"خطای ارسال تلگرام: {e}")
             return None
@@ -544,7 +495,6 @@ class HybridTradingSystem:
             df_4h = self.analysis.calculate_indicators(df_4h)
 
             trend_4h = self.analysis.get_major_trend(df_4h)
-
             rule_signal = self.signal_engine.get_rule_signal(df_15m, trend_4h)
             if not rule_signal:
                 return
@@ -574,7 +524,7 @@ class HybridTradingSystem:
             logger.error(f"خطا در پردازش {symbol}: {e}")
 
     def run_once(self):
-        logger.info("----- شروع آنالیز پیشرفته بازار -----")
+        logger.info("----- شروع آنالیز بازار -----")
         for symbol in self.config.SYMBOLS:
             self.process_symbol(symbol)
             time.sleep(1.5)
@@ -582,8 +532,8 @@ class HybridTradingSystem:
         self.live_trader.update_and_check_trades()
 
     def start(self):
-        logger.info("بات V5 Ultimate Pro با معاملات واقعی فعال شد")
-        start_message = "⚡️ **نسخه جامع V5 Ultimate Pro فعال شد.**\n\nربات به API واقعی صرافی متصل شد و معاملات به‌صورت Spot و خالص تکنیکال اجرا خواهند شد."
+        logger.info("بات فعال شد")
+        start_message = "⚡️ **ربات با موفقیت راه‌اندازی شد.**\n\nتحلیل تکنیکال و کندل‌ها از طریق منبع پایدار و معاملات از صرافی تبدیل انجام می‌شود."
         self.telegram.send_system_status(start_message)
 
         while self.running:
@@ -593,7 +543,6 @@ class HybridTradingSystem:
 
     def stop(self):
         self.running = False
-        logger.info("بات متوقف شد")
 
 if __name__ == "__main__":
     bot = HybridTradingSystem()
