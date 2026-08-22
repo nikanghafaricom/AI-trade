@@ -1,5 +1,5 @@
 # ==============================================
-# Hybrid Signal Bot - نسخه ترکیبی (CCXT Data + Tabdeal Execution)
+# Hybrid Signal Bot - نسخه ترکیبی (Nobitex Data + Tabdeal Execution)
 # ==============================================
 import os
 import time
@@ -45,8 +45,7 @@ threading.Thread(target=start_health_check_server, daemon=True).start()
 
 # ==================== تنظیمات ====================
 class Config:
-    # تغییر مقدار پیش‌فرض به binance برای جلوگیری قطعی از خطای coinex
-    DATA_EXCHANGE_ID = os.getenv("DATA_EXCHANGE_ID", "binance")
+    DATA_EXCHANGE_ID = os.getenv("DATA_EXCHANGE_ID", "nobitex")
     
     # معامله روی صرافی تبدیل انجام می‌شود
     API_KEY = os.getenv("EXCHANGE_API_KEY", "")
@@ -170,26 +169,63 @@ class TabdilExchange:
         data = res.json()
         return {"status": "closed", "raw": data}
 
-# ==================== لایه داده (استفاده از CCXT برای کندل‌ها) ====================
+# ==================== لایه داده (استفاده از نوبیتکس برای کندل‌ها) ====================
 class DataLayer:
     def __init__(self, config: Config):
         self.config = config
-        exchange_class = getattr(ccxt, config.DATA_EXCHANGE_ID)
-        self.data_exchange = exchange_class({
-            'enableRateLimit': True,
-            'options': {'defaultType': 'spot'},
-            'timeout': 30000,
-            'headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-            }
-        })
         self.trade_exchange = TabdilExchange(config.API_KEY, config.SECRET)
 
+    def _convert_timeframe_to_nobitex(self, timeframe: str) -> str:
+        mapping = {
+            "1m": "1",
+            "5m": "5",
+            "15m": "15",
+            "30m": "30",
+            "1h": "60",
+            "4h": "240",
+            "1d": "D"
+        }
+        return mapping.get(timeframe, "15")
+
     def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 100) -> pd.DataFrame:
-        ohlcv = self.data_exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        return df
+        try:
+            # تبدیل نماد به فرمت نوبیتکس (مثلا BTC/USDT به btc-usdt)
+            nobitex_symbol = symbol.lower().replace("/", "-")
+            res_resolution = self._convert_timeframe_to_nobitex(timeframe)
+            
+            url = f"https://api.nobitex.ir/market/udf/history?symbol={nobitex_symbol}&resolution={res_resolution}&count={limit}"
+            res = requests.get(url, timeout=10)
+            data = res.json()
+            
+            if data.get("s") == "ok":
+                timestamps = data.get("t", [])
+                opens = data.get("o", [])
+                highs = data.get("h", [])
+                lows = data.get("l", [])
+                closes = data.get("c", [])
+                volumes = data.get("v", [])
+                
+                df = pd.DataFrame({
+                    'timestamp': timestamps,
+                    'open': opens,
+                    'high': highs,
+                    'low': lows,
+                    'close': closes,
+                    'volume': volumes
+                })
+                
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
+                for col in ['open', 'high', 'low', 'close', 'volume']:
+                    df[col] = df[col].astype(float)
+                    
+                return df
+            else:
+                raise ValueError(f"پاسخ نامعتبر از نوبیتکس: {data}")
+                
+        except Exception as e:
+            logger.error(f"خطا در دریافت کندل از نوبیتکس برای {symbol}: {e}")
+            # بازگرداندن یک دیتافریم خالی استاندارد برای جلوگیری از متوقف شدن ربات
+            return pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
 
 # ==================== لایه تحلیل ====================
 class AnalysisLayer:
@@ -221,6 +257,8 @@ class AnalysisLayer:
         return df
 
     def get_major_trend(self, df_4h: pd.DataFrame) -> str:
+        if df_4h.empty:
+            return "NEUTRAL"
         latest = df_4h.iloc[-1]
         if latest['close'] > latest['ema_trend'] and latest['ema_fast'] > latest['ema_slow']:
             return "BULLISH"
@@ -234,6 +272,9 @@ class SignalEngine:
         self.config = config
 
     def get_rule_signal(self, df_15m: pd.DataFrame, trend_4h: str) -> Optional[str]:
+        if df_15m.empty or len(df_15m) < 2:
+            return None
+            
         latest = df_15m.iloc[-1]
         prev = df_15m.iloc[-2]
         
@@ -345,6 +386,8 @@ class LiveSpotTrader:
             try:
                 symbol = trade['symbol']
                 df = self.data_layer.fetch_ohlcv(symbol, timeframe="1m", limit=5)
+                if df.empty:
+                    continue
                 latest_high = float(df['high'].max())
                 latest_low = float(df['low'].min())
                 entry = trade['entry']
@@ -491,9 +534,13 @@ class HybridTradingSystem:
     def process_symbol(self, symbol: str):
         try:
             df_15m = self.data.fetch_ohlcv(symbol, timeframe=self.config.ENTRY_TIMEFRAME)
+            if df_15m.empty:
+                return
             df_15m = self.analysis.calculate_indicators(df_15m)
 
             df_4h = self.data.fetch_ohlcv(symbol, timeframe=self.config.TREND_TIMEFRAME)
+            if df_4h.empty:
+                return
             df_4h = self.analysis.calculate_indicators(df_4h)
 
             trend_4h = self.analysis.get_major_trend(df_4h)
@@ -535,7 +582,7 @@ class HybridTradingSystem:
 
     def start(self):
         logger.info("بات فعال شد")
-        start_message = "⚡️ **ربات با موفقیت راه‌اندازی شد.**\n\nتحلیل تکنیکال و کندل‌ها از طریق منبع پایدار و معاملات از صرافی تبدیل انجام می‌شود."
+        start_message = "⚡️ **ربات با موفقیت راه‌اندازی شد.**\n\nتحلیل تکنیکال و کندل‌ها از طریق نوبیتکس و معاملات از صرافی تبدیل انجام می‌شود."
         self.telegram.send_system_status(start_message)
 
         while self.running:
