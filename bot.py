@@ -45,8 +45,8 @@ threading.Thread(target=start_health_check_server, daemon=True).start()
 
 # ==================== تنظیمات ====================
 class Config:
-    # داده‌ها از کوینکس یا بایننس گرفته می‌شود تا خطا ندهد
-    DATA_EXCHANGE_ID = os.getenv("DATA_EXCHANGE_ID", "coinex")
+    # تغییر مقدار پیش‌فرض به binance برای جلوگیری قطعی از خطای coinex
+    DATA_EXCHANGE_ID = os.getenv("DATA_EXCHANGE_ID", "binance")
     
     # معامله روی صرافی تبدیل انجام می‌شود
     API_KEY = os.getenv("EXCHANGE_API_KEY", "")
