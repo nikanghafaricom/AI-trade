@@ -1,5 +1,5 @@
 # ==============================================
-# Hybrid Signal Bot - نسخه کامل و اصلاح‌شده (با هدرهای مرورگر برای رفع انسداد)
+# Hybrid Signal Bot - نسخه کامل و اصلاح‌شده (با مدیریت خطای تیکر و بررسی نوع پاسخ)
 # ==============================================
 import os
 import time
@@ -111,9 +111,15 @@ class TabdilExchange:
         url = f"{self.base_url}/p2p/v1/user/balances"
         try:
             res = requests.get(url, headers=self.headers, timeout=10)
+            if res.status_code != 200:
+                return {"USDT": {"free": 0.0, "total": 0.0}, "total": {}}
+            
+            if "application/json" not in res.headers.get("Content-Type", ""):
+                return {"USDT": {"free": 0.0, "total": 0.0}, "total": {}}
+
             data = res.json()
             balances = {"USDT": {"free": 0.0, "total": 0.0}, "total": {}}
-            if res.status_code == 200 and "data" in data:
+            if "data" in data:
                 for item in data["data"]:
                     asset = item.get("asset")
                     free = float(item.get("free", 0))
@@ -132,8 +138,15 @@ class TabdilExchange:
         url = f"{self.base_url}/p2p/v1/ticker?symbol={market}"
         try:
             res = requests.get(url, headers=self.headers, timeout=10)
+            if res.status_code != 200:
+                return {"last": 0.0}
+            
+            if "application/json" not in res.headers.get("Content-Type", ""):
+                logger.error(f"پاسخ غیر JSON از صرافی برای تیکر {symbol}")
+                return {"last": 0.0}
+
             data = res.json()
-            last_price = float(data.get("lastPrice", 0)) if res.status_code == 200 else 0.0
+            last_price = float(data.get("lastPrice", 0)) if isinstance(data, dict) else 0.0
             return {"last": last_price}
         except Exception as e:
             logger.error(f"خطا در دریافت تیکر {symbol}: {e}")
@@ -173,7 +186,7 @@ class TabdilExchange:
             "quantity": amount
         }
         res = requests.post(url, json=payload, headers=self.headers, timeout=10)
-        data = res.json()
+        data = res.json() if res.status_code == 200 and "application/json" in res.headers.get("Content-Type", "") else {}
         ticker = self.fetch_ticker(symbol)
         return {
             "average": ticker.get("last", 0),
@@ -191,7 +204,7 @@ class TabdilExchange:
             "quantity": amount
         }
         res = requests.post(url, json=payload, headers=self.headers, timeout=10)
-        data = res.json()
+        data = res.json() if res.status_code == 200 and "application/json" in res.headers.get("Content-Type", "") else {}
         return {"status": "closed", "raw": data}
 
 # ==================== لایه داده ====================
@@ -562,7 +575,7 @@ class HybridTradingSystem:
 
     def start(self):
         logger.info("بات فعال شد")
-        start_message = "⚡️ **ربات با موفقیت راه‌اندازی شد.**\n\nارتباط با صرافی تبدیل و ارسال هدرهای مرورگر برقرار است."
+        start_message = "⚡️ **ربات با موفقیت راه‌اندازی شد.**\n\nارتباط با صرافی تبدیل و بررسی نوع محتوای پاسخ فعال است."
         self.telegram.send_system_status(start_message)
 
         while self.running:
