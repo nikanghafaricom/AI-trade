@@ -169,11 +169,13 @@ class TabdilExchange:
         data = res.json()
         return {"status": "closed", "raw": data}
 
-# ==================== لایه داده (استفاده از IP مستقیم نوبیتکس برای دور زدن DNS همروش) ====================
+# ==================== لایه داده (نسخه نهایی بدون دخالت پروکسی هاست) ====================
 class DataLayer:
     def __init__(self, config: Config):
         self.config = config
         self.trade_exchange = TabdilExchange(config.API_KEY, config.SECRET)
+        self.session = requests.Session()
+        self.session.trust_env = False
 
     def _convert_timeframe_to_nobitex(self, timeframe: str) -> str:
         mapping = {
@@ -192,11 +194,9 @@ class DataLayer:
             nobitex_symbol = symbol.lower().replace("/", "-")
             res_resolution = self._convert_timeframe_to_nobitex(timeframe)
             
-            # استفاده از IP مستقیم نوبیتکس به همراه هدر Host برای رفع خطای DNS
-            url = f"https://185.8.174.135/market/udf/history?symbol={nobitex_symbol}&resolution={res_resolution}&count={limit}"
-            headers = {"Host": "api.nobitex.ir", "User-Agent": "Mozilla/5.0"}
+            url = f"https://api.nobitex.ir/market/udf/history?symbol={nobitex_symbol}&resolution={res_resolution}&count={limit}"
             
-            res = requests.get(url, headers=headers, timeout=10, verify=False)
+            res = self.session.get(url, timeout=10)
             data = res.json()
             
             if data.get("s") == "ok":
