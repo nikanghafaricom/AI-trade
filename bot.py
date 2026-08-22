@@ -1,5 +1,5 @@
 # ==============================================
-# Hybrid Signal Bot - نسخه کامل و اصلاح‌شده (با مدیریت خطای تیکر و بررسی نوع پاسخ)
+# Hybrid Signal Bot - نسخه کامل و اصلاح‌شده (بله + پل رندر برای تلگرام)
 # ==============================================
 import os
 import time
@@ -48,9 +48,10 @@ class Config:
     SECRET = os.getenv("EXCHANGE_SECRET", "")
     PASSWORD = os.getenv("EXCHANGE_PASSWORD", "")
 
-    TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-    TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-    PERSONAL_CHAT_ID = os.getenv("PERSONAL_CHAT_ID")
+    # تنظیمات بله و پل رندر
+    BALE_BOT_TOKEN = os.getenv("BALE_BOT_TOKEN", "")
+    BALE_CHAT_ID = os.getenv("BALE_CHAT_ID", "")
+    RENDER_WEBHOOK_URL = os.getenv("RENDER_WEBHOOK_URL", "")
 
     SYMBOLS = [
         "BTC/USDT",
@@ -72,8 +73,6 @@ class Config:
 
     def validate(self):
         required = {
-            "TELEGRAM_BOT_TOKEN": self.TELEGRAM_BOT_TOKEN,
-            "TELEGRAM_CHAT_ID": self.TELEGRAM_CHAT_ID,
             "EXCHANGE_API_KEY": self.API_KEY,
             "EXCHANGE_SECRET": self.SECRET,
         }
@@ -423,40 +422,47 @@ class LiveSpotTrader:
 """
         self.telegram.send_personal_message(msg)
 
-# ==================== ارسال تلگرام ====================
+# ==================== ارسال پیام (بله و پل رندر) ====================
 class TelegramSender:
     def __init__(self, config: Config):
         self.config = config
-        self.base_url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}"
+
+    def _send_to_bale(self, text: str):
+        if not self.config.BALE_BOT_TOKEN or not self.config.BALE_CHAT_ID:
+            return
+        try:
+            bale_url = f"https://tapi.bale.ai/bot{self.config.BALE_BOT_TOKEN}/sendMessage"
+            requests.post(
+                bale_url,
+                json={
+                    "chat_id": self.config.BALE_CHAT_ID,
+                    "text": text,
+                    "parse_mode": "Markdown"
+                },
+                timeout=10
+            )
+        except Exception as e:
+            logger.error(f"خطای ارسال پیام به بله: {e}")
+
+    def _send_to_render_bridge(self, text: str):
+        if not self.config.RENDER_WEBHOOK_URL:
+            return
+        try:
+            requests.post(
+                self.config.RENDER_WEBHOOK_URL,
+                json={"text": text},
+                timeout=10
+            )
+        except Exception as e:
+            logger.error(f"خطای ارسال به پل رندر: {e}")
 
     def send_system_status(self, text: str):
-        try:
-            requests.post(
-                f"{self.base_url}/sendMessage",
-                json={
-                    "chat_id": self.config.TELEGRAM_CHAT_ID,
-                    "text": text,
-                    "parse_mode": "Markdown"
-                },
-                timeout=10
-            )
-        except Exception as e:
-            logger.error(f"خطای ارسال پیام به تلگرام: {e}")
+        self._send_to_bale(text)
+        self._send_to_render_bridge(text)
 
     def send_personal_message(self, text: str):
-        target_id = self.config.PERSONAL_CHAT_ID or self.config.TELEGRAM_CHAT_ID
-        try:
-            requests.post(
-                f"{self.base_url}/sendMessage",
-                json={
-                    "chat_id": target_id,
-                    "text": text,
-                    "parse_mode": "Markdown"
-                },
-                timeout=10
-            )
-        except Exception as e:
-            logger.error(f"خطای ارسال پیام شخصی: {e}")
+        self._send_to_bale(text)
+        self._send_to_render_bridge(text)
 
     def send_signal(self, symbol: str, side: str, latest: pd.Series, trend_4h: str) -> Dict:
         emoji = "🟢" if side == "BUY" else "🔴"
@@ -496,20 +502,10 @@ class TelegramSender:
 📊 **RSI:** {latest['rsi']:.1f}
 ⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}
 """
-        try:
-            requests.post(
-                f"{self.base_url}/sendMessage",
-                json={
-                    "chat_id": self.config.TELEGRAM_CHAT_ID,
-                    "text": message,
-                    "parse_mode": "Markdown"
-                },
-                timeout=10
-            )
-            return {"price": price, "tp1": tp1, "tp2": tp2, "tp3": tp3, "sl": stop_loss}
-        except Exception as e:
-            logger.error(f"خطای ارسال تلگرام: {e}")
-            return None
+        self._send_to_bale(message)
+        self._send_to_render_bridge(message)
+
+        return {"price": price, "tp1": tp1, "tp2": tp2, "tp3": tp3, "sl": stop_loss}
 
 # ==================== سیستم اصلی ====================
 class HybridTradingSystem:
@@ -575,7 +571,7 @@ class HybridTradingSystem:
 
     def start(self):
         logger.info("بات فعال شد")
-        start_message = "⚡️ **ربات با موفقیت راه‌اندازی شد.**\n\nارتباط با صرافی تبدیل و بررسی نوع محتوای پاسخ فعال است."
+        start_message = "⚡️ **ربات با موفقیت راه‌اندازی شد.**\n\nارتباط با صرافی تبدیل، پیام‌رسان بله و پل رندر فعال است."
         self.telegram.send_system_status(start_message)
 
         while self.running:
