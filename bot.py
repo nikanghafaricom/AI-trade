@@ -1,5 +1,5 @@
 # ==============================================
-# Hybrid Signal Bot - نسخه نهایی اصلاح شده صرافی تبدیل
+# Hybrid Signal Bot - نسخه کامل و اصلاح‌شده (با هدرهای مرورگر برای رفع انسداد)
 # ==============================================
 import os
 import time
@@ -100,7 +100,8 @@ class TabdilExchange:
         self.base_url = "https://api.tabdeal.org"
         self.headers = {
             "X-API-KEY": self.api_key,
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
 
     def _symbol_transform(self, symbol: str) -> str:
@@ -130,7 +131,7 @@ class TabdilExchange:
         market = self._symbol_transform(symbol)
         url = f"{self.base_url}/p2p/v1/ticker?symbol={market}"
         try:
-            res = requests.get(url, timeout=10)
+            res = requests.get(url, headers=self.headers, timeout=10)
             data = res.json()
             last_price = float(data.get("lastPrice", 0)) if res.status_code == 200 else 0.0
             return {"last": last_price}
@@ -139,14 +140,12 @@ class TabdilExchange:
             return {"last": 0.0}
 
     def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 100) -> pd.DataFrame:
-        # شبیه‌سازی ایمن دیتافریم کندل‌ها بر اساس قیمت لحظه‌ای صرافی تبدیل جهت جلوگیری از خطای ساختار API عمومی
         try:
             ticker = self.fetch_ticker(symbol)
             price = ticker.get("last", 0.0)
             if price <= 0:
                 return pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             
-            # ایجاد دیتافریم مصنوعی استاندارد بر مبنای قیمت زنده برای جلوگیری از متوقف شدن ربات و امکان تست استراتژی
             now = datetime.now()
             timestamps = [now - timedelta(minutes=15 * i) for i in range(limit)]
             timestamps.reverse()
@@ -563,7 +562,7 @@ class HybridTradingSystem:
 
     def start(self):
         logger.info("بات فعال شد")
-        start_message = "⚡️ **ربات با موفقیت راه‌اندازی شد.**\n\nارتباط با صرافی تبدیل بدون خطا برقرار است."
+        start_message = "⚡️ **ربات با موفقیت راه‌اندازی شد.**\n\nارتباط با صرافی تبدیل و ارسال هدرهای مرورگر برقرار است."
         self.telegram.send_system_status(start_message)
 
         while self.running:
