@@ -4,16 +4,19 @@ import os
 
 app = Flask(__name__)
 
-# این مقادیر را در تنظیمات رندر (Environment Variables) وارد کنید
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+
+# اضافه کردن مسیر اصلی برای اینکه UptimeRobot خطا ندهد
+@app.route('/', methods=['GET'])
+def home():
+    return "Bridge is alive!", 200
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
     data = request.json
     message = data.get('text')
     
-    # ارسال به تلگرام
     telegram_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     requests.post(telegram_url, json={
         "chat_id": TELEGRAM_CHAT_ID,
