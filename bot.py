@@ -169,7 +169,7 @@ class TabdilExchange:
         data = res.json()
         return {"status": "closed", "raw": data}
 
-# ==================== لایه داده (استفاده از نوبیتکس برای کندل‌ها) ====================
+# ==================== لایه داده (استفاده از IP مستقیم نوبیتکس برای دور زدن DNS همروش) ====================
 class DataLayer:
     def __init__(self, config: Config):
         self.config = config
@@ -189,12 +189,14 @@ class DataLayer:
 
     def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 100) -> pd.DataFrame:
         try:
-            # تبدیل نماد به فرمت نوبیتکس (مثلا BTC/USDT به btc-usdt)
             nobitex_symbol = symbol.lower().replace("/", "-")
             res_resolution = self._convert_timeframe_to_nobitex(timeframe)
             
-            url = f"https://api.nobitex.ir/market/udf/history?symbol={nobitex_symbol}&resolution={res_resolution}&count={limit}"
-            res = requests.get(url, timeout=10)
+            # استفاده از IP مستقیم نوبیتکس به همراه هدر Host برای رفع خطای DNS
+            url = f"https://185.8.174.135/market/udf/history?symbol={nobitex_symbol}&resolution={res_resolution}&count={limit}"
+            headers = {"Host": "api.nobitex.ir", "User-Agent": "Mozilla/5.0"}
+            
+            res = requests.get(url, headers=headers, timeout=10, verify=False)
             data = res.json()
             
             if data.get("s") == "ok":
@@ -220,11 +222,11 @@ class DataLayer:
                     
                 return df
             else:
-                raise ValueError(f"پاسخ نامعتبر از نوبیتکس: {data}")
+                logger.error(f"پاسخ نامعتبر از نوبیتکس برای {symbol}: {data}")
+                return pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                 
         except Exception as e:
-            logger.error(f"خطا در دریافت کندل از نوبیتکس برای {symbol}: {e}")
-            # بازگرداندن یک دیتافریم خالی استاندارد برای جلوگیری از متوقف شدن ربات
+            logger.error(f"خطا در ارتباط با نوبیتکس برای {symbol}: {e}")
             return pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
 
 # ==================== لایه تحلیل ====================
