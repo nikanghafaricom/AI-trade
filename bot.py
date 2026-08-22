@@ -1,5 +1,5 @@
 # ==============================================
-# Hybrid Signal Bot - نسخه ترکیبی (Nobitex Data + Tabdeal Execution)
+# Hybrid Signal Bot - نسخه کاملاً متکی بر صرافی تبدیل (Data & Trade)
 # ==============================================
 import os
 import time
@@ -12,7 +12,6 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timedelta
 from typing import Dict, Optional, List
 import pandas as pd
-import ccxt
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -45,9 +44,6 @@ threading.Thread(target=start_health_check_server, daemon=True).start()
 
 # ==================== تنظیمات ====================
 class Config:
-    DATA_EXCHANGE_ID = os.getenv("DATA_EXCHANGE_ID", "nobitex")
-    
-    # معامله روی صرافی تبدیل انجام می‌شود
     API_KEY = os.getenv("EXCHANGE_API_KEY", "")
     SECRET = os.getenv("EXCHANGE_SECRET", "")
     PASSWORD = os.getenv("EXCHANGE_PASSWORD", "")
@@ -96,7 +92,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ==================== کلاس صرافی تبدیل (فقط برای معامله و موجودی) ====================
+# ==================== صرافی تبدیل (مرجع کامل داده و معاملات) ====================
 class TabdilExchange:
     def __init__(self, api_key: str, secret: str):
         self.api_key = api_key
@@ -138,6 +134,67 @@ class TabdilExchange:
         last_price = float(data.get("lastPrice", 0)) if res.status_code == 200 else 0.0
         return {"last": last_price}
 
+    def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 100) -> pd.DataFrame:
+        market = self._symbol_transform(symbol)
+        
+        # نگاشت تایم‌فریم‌ها برای اندپوینت تبدیل
+        tf_mapping = {
+            "1m": "1m",
+            "5m": "5m",
+            "15m": "15m",
+            "30m": "30m",
+            "1h": "1h",
+            "4h": "4h",
+            "1d": "1d"
+        }
+        resolution = tf_mapping.get(timeframe, "15m")
+        
+        url = f"{self.base_url}/land/v1/depth/candles?symbol={market}&period={resolution}&count={limit}"
+        try:
+            res = requests.get(url, timeout=10)
+            data = res.json()
+            
+            # استخراج ساختار داده کندل‌ها از پاسخ تبدیل
+            candles = []
+            if isinstance(data, list):
+                candles = data
+            elif isinstance(data, dict) and "data" in data:
+                candles = data["data"]
+                
+            if candles:
+                timestamps, opens, highs, lows, closes, volumes = [], [], [], [], [], []
+                for c in candles:
+                    # پشتیبانی از کلیدهای استاندارد مختلف در پاسخ‌های صرافی
+                    timestamps.append(c.get('time') or c.get('timestamp') or c.get('t', 0))
+                    opens.append(float(c.get('open') or c.get('o', 0)))
+                    highs.append(float(c.get('high') or c.get('h', 0)))
+                    lows.append(float(c.get('low') or c.get('l', 0)))
+                    closes.append(float(c.get('close') or c.get('c', 0)))
+                    volumes.append(float(c.get('volume') or c.get('v', 0)))
+
+                df = pd.DataFrame({
+                    'timestamp': timestamps,
+                    'open': opens,
+                    'high': highs,
+                    'low': lows,
+                    'close': closes,
+                    'volume': volumes
+                })
+                
+                # تشخیص واحد زمان (ثانیه یا میلی‌ثانیه)
+                if not df.empty:
+                    if df['timestamp'].iloc[0] > 1e11:
+                        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                    else:
+                        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
+                        
+                return df
+            
+            return pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        except Exception as e:
+            logger.error(f"خطا در دریافت کندل‌ها از تبدیل برای {symbol}: {e}")
+            return pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+
     def create_market_buy_order(self, symbol: str, amount: float) -> dict:
         market = self._symbol_transform(symbol)
         url = f"{self.base_url}/p2p/v1/order"
@@ -169,65 +226,14 @@ class TabdilExchange:
         data = res.json()
         return {"status": "closed", "raw": data}
 
-# ==================== لایه داده (نسخه نهایی بدون دخالت پروکسی هاست) ====================
+# ==================== لایه داده (منطبق بر تبدیل) ====================
 class DataLayer:
     def __init__(self, config: Config):
         self.config = config
         self.trade_exchange = TabdilExchange(config.API_KEY, config.SECRET)
-        self.session = requests.Session()
-        self.session.trust_env = False
-
-    def _convert_timeframe_to_nobitex(self, timeframe: str) -> str:
-        mapping = {
-            "1m": "1",
-            "5m": "5",
-            "15m": "15",
-            "30m": "30",
-            "1h": "60",
-            "4h": "240",
-            "1d": "D"
-        }
-        return mapping.get(timeframe, "15")
 
     def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 100) -> pd.DataFrame:
-        try:
-            nobitex_symbol = symbol.lower().replace("/", "-")
-            res_resolution = self._convert_timeframe_to_nobitex(timeframe)
-            
-            url = f"https://api.nobitex.ir/market/udf/history?symbol={nobitex_symbol}&resolution={res_resolution}&count={limit}"
-            
-            res = self.session.get(url, timeout=10)
-            data = res.json()
-            
-            if data.get("s") == "ok":
-                timestamps = data.get("t", [])
-                opens = data.get("o", [])
-                highs = data.get("h", [])
-                lows = data.get("l", [])
-                closes = data.get("c", [])
-                volumes = data.get("v", [])
-                
-                df = pd.DataFrame({
-                    'timestamp': timestamps,
-                    'open': opens,
-                    'high': highs,
-                    'low': lows,
-                    'close': closes,
-                    'volume': volumes
-                })
-                
-                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
-                for col in ['open', 'high', 'low', 'close', 'volume']:
-                    df[col] = df[col].astype(float)
-                    
-                return df
-            else:
-                logger.error(f"پاسخ نامعتبر از نوبیتکس برای {symbol}: {data}")
-                return pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                
-        except Exception as e:
-            logger.error(f"خطا در ارتباط با نوبیتکس برای {symbol}: {e}")
-            return pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        return self.trade_exchange.fetch_ohlcv(symbol, timeframe, limit)
 
 # ==================== لایه تحلیل ====================
 class AnalysisLayer:
@@ -235,6 +241,8 @@ class AnalysisLayer:
         self.config = config
 
     def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        if df.empty or len(df) < 15:
+            return df
         df = df.copy()
         delta = df['close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
@@ -259,9 +267,11 @@ class AnalysisLayer:
         return df
 
     def get_major_trend(self, df_4h: pd.DataFrame) -> str:
-        if df_4h.empty:
+        if df_4h.empty or 'ema_trend' not in df_4h.columns:
             return "NEUTRAL"
         latest = df_4h.iloc[-1]
+        if pd.isna(latest['ema_trend']):
+            return "NEUTRAL"
         if latest['close'] > latest['ema_trend'] and latest['ema_fast'] > latest['ema_slow']:
             return "BULLISH"
         elif latest['close'] < latest['ema_trend'] and latest['ema_fast'] < latest['ema_slow']:
@@ -280,7 +290,7 @@ class SignalEngine:
         latest = df_15m.iloc[-1]
         prev = df_15m.iloc[-2]
         
-        if pd.isna(latest['rsi']) or pd.isna(latest['ema_fast']) or pd.isna(latest['atr']):
+        if 'rsi' not in latest or pd.isna(latest['rsi']) or pd.isna(latest['ema_fast']) or pd.isna(latest['atr']):
             return None
 
         if latest['atr'] < (latest['close'] * 0.0015):
@@ -575,7 +585,7 @@ class HybridTradingSystem:
             logger.error(f"خطا در پردازش {symbol}: {e}")
 
     def run_once(self):
-        logger.info("----- شروع آنالیز بازار -----")
+        logger.info("----- شروع آنالیز بازار (از طریق تبدیل) -----")
         for symbol in self.config.SYMBOLS:
             self.process_symbol(symbol)
             time.sleep(1.5)
@@ -584,7 +594,7 @@ class HybridTradingSystem:
 
     def start(self):
         logger.info("بات فعال شد")
-        start_message = "⚡️ **ربات با موفقیت راه‌اندازی شد.**\n\nتحلیل تکنیکال و کندل‌ها از طریق نوبیتکس و معاملات از صرافی تبدیل انجام می‌شود."
+        start_message = "⚡️ **ربات با موفقیت راه‌اندازی شد.**\n\nتحلیل تکنیکال، کندل‌ها و معاملات همگی مستقیماً از طریق صرافی تبدیل انجام می‌شوند."
         self.telegram.send_system_status(start_message)
 
         while self.running:
