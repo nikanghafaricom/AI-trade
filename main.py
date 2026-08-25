@@ -19,6 +19,11 @@ load_dotenv()
 
 # ==================== تنظیمات ====================
 class Config:
+    EXCHANGE_ID = "coinex"
+    API_KEY = os.getenv("EXCHANGE_API_KEY", "")
+    SECRET = os.getenv("EXCHANGE_SECRET", "")
+    PASSWORD = os.getenv("EXCHANGE_PASSWORD", "")
+
     TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
     TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID", "")   # مخصوص کانال (سیگنال‌ها)
     TELEGRAM_PERSONAL_ID = os.getenv("TELEGRAM_PERSONAL_ID", "") # مخصوص پی‌وی (نتیجه معاملات)
@@ -156,16 +161,19 @@ class TelegramNotifier:
         except Exception as e:
             logger.error(f"خطا در ارسال پیام به پی‌وی تلگرام: {e}")
 
-# ==================== صرافی عمومی (برای دانلود دیتا بدون نیاز به API Key) ====================
+# ==================== صرافی (برای دانلود دیتا با تنظیمات صرافی کوین‌اکس) ====================
 class PublicMarketDataFetcher:
-    def __init__(self):
+    def __init__(self, config: Config):
         try:
-            self.exchange = ccxt.binance({
+            exchange_class = getattr(ccxt, config.EXCHANGE_ID)
+            self.exchange = exchange_class({
+                'apiKey': config.API_KEY,
+                'secret': config.SECRET,
                 'enableRateLimit': True,
                 'options': {'defaultType': 'spot'}
             })
         except Exception as e:
-            logger.error(f"خطا در ایجاد اتصال عمومی صرافی: {e}")
+            logger.error(f"خطا در ایجاد اتصال صرافی: {e}")
             self.exchange = None
 
     def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 100) -> list:
@@ -183,7 +191,7 @@ class RenderSignalSystem:
     def __init__(self):
         self.config = Config()
         self.config.validate()
-        self.data_fetcher = PublicMarketDataFetcher()
+        self.data_fetcher = PublicMarketDataFetcher(self.config)
         self.running = True
 
     def send_to_hamravesh(self, symbol: str, ohlcv: list):
