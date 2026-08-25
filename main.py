@@ -14,15 +14,14 @@ import pandas as pd
 import ccxt
 import requests
 from dotenv import load_dotenv
-from telegram import Bot
-from telegram.error import TelegramError
 
 load_dotenv()
 
 # ==================== تنظیمات ====================
 class Config:
     TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-    TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+    TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID", "")   # مخصوص کانال (سیگنال‌ها)
+    TELEGRAM_PERSONAL_ID = os.getenv("TELEGRAM_PERSONAL_ID", "") # مخصوص پی‌وی (نتیجه معاملات)
     HAMRAVESH_WEBHOOK_URL = os.getenv("HAMRAVESH_WEBHOOK_URL", "")
     SECRET_TOKEN = os.getenv("SECRET_TOKEN", "")
 
@@ -44,8 +43,8 @@ class Config:
     CHECK_INTERVAL = 300  # هر ۵ دقیقه یک‌بار
 
     def validate(self):
-        if not self.TELEGRAM_BOT_TOKEN or not self.TELEGRAM_CHAT_ID:
-            print("هشدار: توکن تلگرام یا چت‌آی‌دی تنظیم نشده است.")
+        if not self.TELEGRAM_BOT_TOKEN or (not self.TELEGRAM_CHANNEL_ID and not self.TELEGRAM_PERSONAL_ID):
+            print("هشدار: توکن یا آیدی‌های تلگرام به درستی تنظیم نشده‌اند.")
 
 # ==================== لاگ ====================
 logging.basicConfig(
@@ -81,7 +80,7 @@ class RenderWebhookHandler(BaseHTTPRequestHandler):
             post_data = self.rfile.read(content_length)
             data = json.loads(post_data.decode('utf-8'))
             
-            # اگر همروش گزارش انجام معامله داد، به تلگرام ارسال کن
+            # اگر همروش گزارش انجام معامله داد، به پی‌وی شخصی ارسال کن
             if data.get("action") == "new_trade":
                 symbol = data.get("symbol")
                 side = data.get("side")
@@ -97,8 +96,8 @@ class RenderWebhookHandler(BaseHTTPRequestHandler):
                     f"🏷 صرافی: `تبدیل (Tabdeal)`"
                 )
                 
-                # ارسال مستقیم به تلگرام از طریق ترد یا متد داخلی
-                TelegramNotifier.send_sync_message(msg)
+                # ارسال به پی‌وی شخصی
+                TelegramNotifier.send_to_personal(msg)
 
             self.send_response(200)
             self.send_header("Content-type", "application/json")
@@ -123,29 +122,44 @@ def start_render_server():
 
 threading.Thread(target=start_render_server, daemon=True).start()
 
-# ==================== ارسال‌کننده پیام به تلگرام ====================
+# ==================== ارسال‌کننده پیام به تلگرام (تفکیک کانال و پی‌وی) ====================
 class TelegramNotifier:
     @staticmethod
-    def send_sync_message(message: str):
+    def send_to_channel(message: str):
         config = Config()
-        if not config.TELEGRAM_BOT_TOKEN or not config.TELEGRAM_CHAT_ID:
+        if not config.TELEGRAM_BOT_TOKEN or not config.TELEGRAM_CHANNEL_ID:
             return
         try:
             url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage"
             payload = {
-                "chat_id": config.TELEGRAM_CHAT_ID,
+                "chat_id": config.TELEGRAM_CHANNEL_ID,
                 "text": message,
                 "parse_mode": "Markdown"
             }
             requests.post(url, json=payload, timeout=10)
         except Exception as e:
-            logger.error(f"خطا در ارسال پیام به تلگرام: {e}")
+            logger.error(f"خطا در ارسال پیام به کانال تلگرام: {e}")
+
+    @staticmethod
+    def send_to_personal(message: str):
+        config = Config()
+        if not config.TELEGRAM_BOT_TOKEN or not config.TELEGRAM_PERSONAL_ID:
+            return
+        try:
+            url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage"
+            payload = {
+                "chat_id": config.TELEGRAM_PERSONAL_ID,
+                "text": message,
+                "parse_mode": "Markdown"
+            }
+            requests.post(url, json=payload, timeout=10)
+        except Exception as e:
+            logger.error(f"خطا در ارسال پیام به پی‌وی تلگرام: {e}")
 
 # ==================== صرافی عمومی (برای دانلود دیتا بدون نیاز به API Key) ====================
 class PublicMarketDataFetcher:
     def __init__(self):
         try:
-            # استفاده از صرافی بایننس یا تبدیل بصورت عمومی برای گرفتن کندل‌ها
             self.exchange = ccxt.binance({
                 'enableRateLimit': True,
                 'options': {'defaultType': 'spot'}
@@ -158,12 +172,10 @@ class PublicMarketDataFetcher:
         if not self.exchange:
             return []
         try:
-            # تبدیل فرمت نماد در صورت نیاز (مثلا اگر بایننس نام دیگری دارد)
-            # اینجا فرض بر این است که نمادها استاندارد ccxt هستند
             ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
             return ohlcv
         except Exception as e:
-            logger.error(f"خطا در دریافت کندل‌های {symbol} ({timeframer}): {e}")
+            logger.error(f"خطا در دریافت کندل‌های {symbol} ({timeframe}): {e}")
             return []
 
 # ==================== سیستم اصلی رندر ====================
@@ -196,18 +208,17 @@ class RenderSignalSystem:
 
     def run_loop(self):
         logger.info("بخش رندر (Render Signal Generator) با موفقیت فعال شد.")
-        TelegramNotifier.send_sync_message("🚀 ربات رندر (تحلیلگر و ارسال‌کننده داده) با موفقیت روشن شد.")
+        TelegramNotifier.send_to_personal("🚀 ربات رندر (تحلیلگر و ارسال‌کننده داده) با موفقیت روشن شد.")
 
         while self.running:
             for symbol in self.config.SYMBOLS:
                 try:
-                    # دریافت کندل‌های 15 دقیقه یا 4 ساعته برای ارسال به همروش
                     ohlcv_15m = self.data_fetcher.fetch_ohlcv(symbol, self.config.ENTRY_TIMEFRAME, limit=120)
                     
                     if ohlcv_15m:
                         self.send_to_hamravesh(symbol, ohlcv_15m)
                     
-                    time.sleep(2) # فاصله کوتاه بین درخواست نمادها برای جلوگیری از ریت‌لیمیت
+                    time.sleep(2)
                 except Exception as e:
                     logger.error(f"خطا در حلقه پردازش نماد {symbol}: {e}")
 
