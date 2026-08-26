@@ -1,5 +1,5 @@
 # ==============================================
-# Hybrid Signal Bot - نسخه نهایی رندر با ارسال سیگنال خام به کانال (Render)
+# Hybrid Signal Bot - نسخه نهایی رندر با ارسال سیگنال خام به کانال و گزارش سود/زیان واقعی به پی‌وی (Render)
 # ==============================================
 import os
 import time
@@ -85,14 +85,16 @@ class RenderWebhookHandler(BaseHTTPRequestHandler):
             post_data = self.rfile.read(content_length)
             data = json.loads(post_data.decode('utf-8'))
             
-            # اگر همروش گزارش انجام معامله داد:
-            if data.get("action") == "new_trade":
+            action = data.get("action")
+
+            # ۱. اگر گزارش ورود به معامله جدید بود:
+            if action == "new_trade":
                 symbol = data.get("symbol")
                 side = data.get("side")
                 price = data.get("price")
                 trend = data.get("trend")
                 
-                # ۱. ارسال گزارش اجرای واقعی به پی‌وی شخصی
+                # ارسال گزارش اجرای واقعی به پی‌وی شخصی
                 personal_msg = (
                     f"🚨 **گزارش اجرای معامله واقعی (اسپات)** 🚨\n\n"
                     f"💎 نماد: `{symbol}`\n"
@@ -103,7 +105,7 @@ class RenderWebhookHandler(BaseHTTPRequestHandler):
                 )
                 TelegramNotifier.send_to_personal(personal_msg)
 
-                # ۲. ارسال سیگنال خام به کانال عمومی
+                # ارسال سیگنال خام به کانال عمومی
                 channel_msg = (
                     f"📢 **سیگنال جدید بازار (تحلیل تکنیکال)** 📢\n\n"
                     f"💎 نماد: `{symbol}`\n"
@@ -113,6 +115,24 @@ class RenderWebhookHandler(BaseHTTPRequestHandler):
                     f"⚡️ وضعیت: شناسایی و ارسال شده توسط ربات هوشمند"
                 )
                 TelegramNotifier.send_to_channel(channel_msg)
+
+            # ۲. اگر گزارش بسته شدن معامله و محاسبه سود/زیان واقعی بود:
+            elif action == "close_trade":
+                symbol = data.get("symbol")
+                exit_price = data.get("exit_price")
+                pnl = data.get("pnl")
+                
+                emoji = "✅" if pnl >= 0 else "❌"
+                status_text = "سود" if pnl >= 0 else "زیان"
+                
+                close_msg = (
+                    f"{emoji} **گزارش نتیجه نهایی معامله (اسپات)** {emoji}\n\n"
+                    f"💎 نماد: `{symbol}`\n"
+                    f"💵 قیمت خروج: `{exit_price}`\n"
+                    f"📊 نتیجه: **{status_text} با {pnl:+.2f}%**\n"
+                    f"🏷 صرافی: `تبدیل (Tabdeal)`"
+                )
+                TelegramNotifier.send_to_personal(close_msg)
 
             self.send_response(200)
             self.send_header("Content-type", "application/json")
