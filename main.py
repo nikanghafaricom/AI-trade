@@ -1,5 +1,5 @@
 # ==============================================
-# Hybrid Signal Bot - نسخه نهایی رندر (Render - Signal Fetcher & Telegram Bot)
+# Hybrid Signal Bot - نسخه نهایی رندر با ارسال سیگنال خام به کانال (Render)
 # ==============================================
 import os
 import time
@@ -25,7 +25,7 @@ class Config:
     PASSWORD = os.getenv("EXCHANGE_PASSWORD", "")
 
     TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-    TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID", "")   # مخصوص کانال (سیگنال‌ها)
+    TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID", "")   # مخصوص کانال (سیگنال‌های خام)
     TELEGRAM_PERSONAL_ID = os.getenv("TELEGRAM_PERSONAL_ID", "") # مخصوص پی‌وی (نتیجه معاملات)
     HAMRAVESH_WEBHOOK_URL = os.getenv("HAMRAVESH_WEBHOOK_URL", "")
     SECRET_TOKEN = os.getenv("SECRET_TOKEN", "")
@@ -85,24 +85,34 @@ class RenderWebhookHandler(BaseHTTPRequestHandler):
             post_data = self.rfile.read(content_length)
             data = json.loads(post_data.decode('utf-8'))
             
-            # اگر همروش گزارش انجام معامله داد، به پی‌وی شخصی ارسال کن
+            # اگر همروش گزارش انجام معامله داد:
             if data.get("action") == "new_trade":
                 symbol = data.get("symbol")
                 side = data.get("side")
                 price = data.get("price")
                 trend = data.get("trend")
                 
-                msg = (
-                    f"🚨 **سیگنال و اجرای معامله جدید (اسپات)** 🚨\n\n"
+                # ۱. ارسال گزارش اجرای واقعی به پی‌وی شخصی
+                personal_msg = (
+                    f"🚨 **گزارش اجرای معامله واقعی (اسپات)** 🚨\n\n"
                     f"💎 نماد: `{symbol}`\n"
                     f"📊 نوع پوزیشن: **{side}**\n"
                     f"💵 قیمت ورود: `{price}`\n"
                     f"📈 روند کلی (4h): `{trend}`\n"
                     f"🏷 صرافی: `تبدیل (Tabdeal)`"
                 )
-                
-                # ارسال به پی‌وی شخصی
-                TelegramNotifier.send_to_personal(msg)
+                TelegramNotifier.send_to_personal(personal_msg)
+
+                # ۲. ارسال سیگنال خام به کانال عمومی
+                channel_msg = (
+                    f"📢 **سیگنال جدید بازار (تحلیل تکنیکال)** 📢\n\n"
+                    f"💎 نماد: `{symbol}`\n"
+                    f"📊 سیگنال: **{side}**\n"
+                    f"💵 قیمت لحظه‌ای: `{price}`\n"
+                    f"📈 روند صعودی/نزولی: `{trend}`\n"
+                    f"⚡️ وضعیت: شناسایی و ارسال شده توسط ربات هوشمند"
+                )
+                TelegramNotifier.send_to_channel(channel_msg)
 
             self.send_response(200)
             self.send_header("Content-type", "application/json")
