@@ -1,5 +1,5 @@
 # ==============================================
-# Hybrid Signal Bot - نسخه نهایی رندر با ارسال سیگنال خام به کانال و گزارش سود/زیان واقعی به پی‌وی (Render)
+# Hybrid Signal Bot - نسخه رندر (Render: دریافت، تحلیل، ارسال به کانال و همروش)
 # ==============================================
 import os
 import time
@@ -62,7 +62,110 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ==================== وب‌سرور برای Health Check و دریافت تاییدیه معامله از همروش ====================
+# ==================== لایه تحلیل تکنیکال (منتقل شده به رندر) ====================
+class AnalysisLayer:
+    def __init__(self, config: Config):
+        self.config = config
+
+    def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        df = df.copy()
+        
+        delta = df['close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        df['rsi'] = 100 - (100 / (1 + rs))
+
+        df['ema_fast'] = df['close'].ewm(span=20, adjust=False).mean()
+        df['ema_slow'] = df['close'].ewm(span=50, adjust=False).mean()
+        df['ema_trend'] = df['close'].ewm(span=200, adjust=False).mean()
+
+        high_low = df['high'] - df['low']
+        high_close = (df['high'] - df['close'].shift()).abs()
+        low_close = (df['low'] - df['close'].shift()).abs()
+        tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+        df['atr'] = tr.rolling(window=14).mean()
+
+        df['vol_sma'] = df['volume'].rolling(window=20).mean()
+        df['support'] = df['low'].rolling(window=15).min()
+        df['resistance'] = df['high'].rolling(window=15).max()
+
+        return df
+
+    def get_major_trend(self, df_trend: pd.DataFrame) -> str:
+        latest = df_trend.iloc[-1]
+        if latest['close'] > latest['ema_trend'] and latest['ema_fast'] > latest['ema_slow']:
+            return "BULLISH"
+        elif latest['close'] < latest['ema_trend'] and latest['ema_fast'] < latest['ema_slow']:
+            return "BEARISH"
+        return "NEUTRAL"
+
+# ==================== موتور سیگنال (منتقل شده به رندر) ====================
+class SignalEngine:
+    def __init__(self, config: Config):
+        self.config = config
+
+    def get_rule_signal(self, df_15m: pd.DataFrame, trend_4h: str) -> Optional[str]:
+        latest = df_15m.iloc[-1]
+        prev = df_15m.iloc[-2]
+        
+        if pd.isna(latest['rsi']) or pd.isna(latest['ema_fast']) or pd.isna(latest['atr']):
+            return None
+
+        if latest['atr'] < (latest['close'] * 0.0015):
+            return None
+
+        volume_confirmed = latest['volume'] > (latest['vol_sma'] * 0.50)
+
+        if trend_4h in ["BULLISH", "NEUTRAL"]:
+            ema_bull = latest['ema_fast'] > latest['ema_slow']
+            rsi_buy = (latest['rsi'] > 42 and prev['rsi'] <= 42) or (48 <= latest['rsi'] <= 65 and latest['rsi'] > prev['rsi'])
+            if ema_bull and rsi_buy and volume_confirmed:
+                return "BUY"
+
+        if trend_4h in ["BEARISH", "NEUTRAL"]:
+            ema_bear = latest['ema_fast'] < latest['ema_slow']
+            rsi_sell = (latest['rsi'] < 58 and prev['rsi'] >= 58) or (35 <= latest['rsi'] <= 52 and latest['rsi'] < prev['rsi'])
+            if ema_bear and rsi_sell and volume_confirmed:
+                return "SELL"
+
+        return None
+
+# ==================== ارسال‌کننده پیام به تلگرام ====================
+class TelegramNotifier:
+    @staticmethod
+    def send_to_channel(message: str):
+        config = Config()
+        if not config.TELEGRAM_BOT_TOKEN or not config.TELEGRAM_CHANNEL_ID:
+            return
+        try:
+            url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage"
+            payload = {
+                "chat_id": config.TELEGRAM_CHANNEL_ID,
+                "text": message,
+                "parse_mode": "Markdown"
+            }
+            requests.post(url, json=payload, timeout=10)
+        except Exception as e:
+            logger.error(f"خطا در ارسال پیام به کانال تلگرام: {e}")
+
+    @staticmethod
+    def send_to_personal(message: str):
+        config = Config()
+        if not config.TELEGRAM_BOT_TOKEN or not config.TELEGRAM_PERSONAL_ID:
+            return
+        try:
+            url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage"
+            payload = {
+                "chat_id": config.TELEGRAM_PERSONAL_ID,
+                "text": message,
+                "parse_mode": "Markdown"
+            }
+            requests.post(url, json=payload, timeout=10)
+        except Exception as e:
+            logger.error(f"خطا در ارسال پیام به پی‌وی تلگرام: {e}")
+
+# ==================== وب‌سرور برای Health Check و دریافت گزارش سود/زیان از همروش ====================
 class RenderWebhookHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -72,7 +175,6 @@ class RenderWebhookHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         try:
-            # بررسی توکن امنیتی دریافتی از همروش
             auth_token = self.headers.get("X-Secret-Token")
             config = Config()
             
@@ -87,37 +189,8 @@ class RenderWebhookHandler(BaseHTTPRequestHandler):
             
             action = data.get("action")
 
-            # ۱. اگر گزارش ورود به معامله جدید بود:
-            if action == "new_trade":
-                symbol = data.get("symbol")
-                side = data.get("side")
-                price = data.get("price")
-                trend = data.get("trend")
-                
-                # ارسال گزارش اجرای واقعی به پی‌وی شخصی
-                personal_msg = (
-                    f"🚨 **گزارش اجرای معامله واقعی (اسپات)** 🚨\n\n"
-                    f"💎 نماد: `{symbol}`\n"
-                    f"📊 نوع پوزیشن: **{side}**\n"
-                    f"💵 قیمت ورود: `{price}`\n"
-                    f"📈 روند کلی (4h): `{trend}`\n"
-                    f"🏷 صرافی: `تبدیل (Tabdeal)`"
-                )
-                TelegramNotifier.send_to_personal(personal_msg)
-
-                # ارسال سیگنال خام به کانال عمومی
-                channel_msg = (
-                    f"📢 **سیگنال جدید بازار (تحلیل تکنیکال)** 📢\n\n"
-                    f"💎 نماد: `{symbol}`\n"
-                    f"📊 سیگنال: **{side}**\n"
-                    f"💵 قیمت لحظه‌ای: `{price}`\n"
-                    f"📈 روند صعودی/نزولی: `{trend}`\n"
-                    f"⚡️ وضعیت: شناسایی و ارسال شده توسط ربات هوشمند"
-                )
-                TelegramNotifier.send_to_channel(channel_msg)
-
-            # ۲. اگر گزارش بسته شدن معامله و محاسبه سود/زیان واقعی بود:
-            elif action == "close_trade":
+            # دریافت گزارش بسته شدن معامله و محاسبه سود/زیان واقعی از همروش
+            if action == "close_trade":
                 symbol = data.get("symbol")
                 exit_price = data.get("exit_price")
                 pnl = data.get("pnl")
@@ -157,41 +230,7 @@ def start_render_server():
 
 threading.Thread(target=start_render_server, daemon=True).start()
 
-# ==================== ارسال‌کننده پیام به تلگرام (تفکیک کانال و پی‌وی) ====================
-class TelegramNotifier:
-    @staticmethod
-    def send_to_channel(message: str):
-        config = Config()
-        if not config.TELEGRAM_BOT_TOKEN or not config.TELEGRAM_CHANNEL_ID:
-            return
-        try:
-            url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage"
-            payload = {
-                "chat_id": config.TELEGRAM_CHANNEL_ID,
-                "text": message,
-                "parse_mode": "Markdown"
-            }
-            requests.post(url, json=payload, timeout=10)
-        except Exception as e:
-            logger.error(f"خطا در ارسال پیام به کانال تلگرام: {e}")
-
-    @staticmethod
-    def send_to_personal(message: str):
-        config = Config()
-        if not config.TELEGRAM_BOT_TOKEN or not config.TELEGRAM_PERSONAL_ID:
-            return
-        try:
-            url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage"
-            payload = {
-                "chat_id": config.TELEGRAM_PERSONAL_ID,
-                "text": message,
-                "parse_mode": "Markdown"
-            }
-            requests.post(url, json=payload, timeout=10)
-        except Exception as e:
-            logger.error(f"خطا در ارسال پیام به پی‌وی تلگرام: {e}")
-
-# ==================== صرافی (برای دانلود دیتا با تنظیمات صرافی کوین‌اکس) ====================
+# ==================== صرافی (برای دانلود دیتا از کوین‌اکس) ====================
 class PublicMarketDataFetcher:
     def __init__(self, config: Config):
         try:
@@ -216,46 +255,106 @@ class PublicMarketDataFetcher:
             logger.error(f"خطا در دریافت کندل‌های {symbol} ({timeframe}): {e}")
             return []
 
+# ==================== بررسی اتصال کامل چرخه‌ها و ارسال پیام راه‌اندازی ====================
+def verify_and_notify_startup(config: Config):
+    """بررسی اتصال تک تک چرخه‌ها (رندر به همروش و برگشت) و ارسال پیام راه‌اندازی فقط در صورت صحت کامل"""
+    if not config.HAMRAVESH_WEBHOOK_URL:
+        logger.warning("آدرس وب‌هوک همروش تنظیم نشده است؛ اتصال کامل تایید نمی‌شود.")
+        return
+
+    max_retries = 10
+    delay = 6
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            logger.info(f"تلاش {attempt}/{max_retries} برای بررسی اتصال چرخه کامل رندر <-> همروش...")
+            headers = {"X-Secret-Token": config.SECRET_TOKEN}
+            # ارسال یک درخواست پینگ تست به همروش برای سنجش سلامت چرخه
+            response = requests.post(config.HAMRAVESH_WEBHOOK_URL, json={"action": "ping"}, headers=headers, timeout=5)
+            
+            if response.status_code == 200:
+                logger.info("اتصال چرخه کامل رندر و همروش با موفقیت برقرار شد و تایید گردید.")
+                startup_msg = "🚀 ربات هیبرید با موفقیت روشن شد: تمام چرخه‌ها (رندر، همروش، تحلیل و صرافی) کاملاً متصل و عملیاتی هستند."
+                TelegramNotifier.send_to_personal(startup_msg)
+                return
+        except Exception as e:
+            logger.warning(f"تلاش {attempt}: هنوز ارتباط کامل برقرار نشده است ({e})")
+        
+        time.sleep(delay)
+    
+    logger.error("خطا: چرخه‌های رندر و همروش به طور کامل متصل نشدند؛ پیام راه‌اندازی ارسال نگردید.")
+
 # ==================== سیستم اصلی رندر ====================
 class RenderSignalSystem:
     def __init__(self):
         self.config = Config()
         self.config.validate()
         self.data_fetcher = PublicMarketDataFetcher(self.config)
+        self.analysis = AnalysisLayer(self.config)
+        self.signal_engine = SignalEngine(self.config)
         self.running = True
+        self.last_signal_time: Dict[str, datetime] = {}
 
-    def send_to_hamravesh(self, symbol: str, ohlcv: list):
+    def send_signal_to_hamravesh(self, payload: dict):
         if not self.config.HAMRAVESH_WEBHOOK_URL:
             return
         try:
-            payload = {
-                "symbol": symbol,
-                "ohlcv": ohlcv
-            }
             headers = {"X-Secret-Token": self.config.SECRET_TOKEN}
-            response = requests.post(
-                self.config.HAMRAVESH_WEBHOOK_URL, 
-                json=payload, 
-                headers=headers, 
-                timeout=15
-            )
-            if response.status_code != 200:
-                logger.warning(f"ارسال به همروش با کد وضعیت نامعتبر مواجه شد: {response.status_code}")
+            requests.post(self.config.HAMRAVESH_WEBHOOK_URL, json=payload, headers=headers, timeout=15)
         except Exception as e:
-            logger.error(f"خطا در ارسال داده بازار به همروش برای {symbol}: {e}")
+            logger.error(f"خطا در ارسال سیگنال به همروش: {e}")
 
     def run_loop(self):
         logger.info("بخش رندر (Render Signal Generator) با موفقیت فعال شد.")
-        TelegramNotifier.send_to_personal("🚀 ربات رندر (تحلیلگر و ارسال‌کننده داده) با موفقیت روشن شد.")
+        
+        # بررسی صحت اتصال چرخه کامل و ارسال پیام راه‌اندازی (در یک ترد جداگانه برای جلوگیری از بلاک شدن حلقه اصلی)
+        threading.Thread(target=verify_and_notify_startup, args=(self.config,), daemon=True).start()
 
         while self.running:
             for symbol in self.config.SYMBOLS:
                 try:
                     ohlcv_15m = self.data_fetcher.fetch_ohlcv(symbol, self.config.ENTRY_TIMEFRAME, limit=120)
                     
-                    if ohlcv_15m:
-                        self.send_to_hamravesh(symbol, ohlcv_15m)
-                    
+                    if ohlcv_15m and len(ohlcv_15m) >= 50:
+                        df = pd.DataFrame(ohlcv_15m, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                        
+                        df_indicators = self.analysis.calculate_indicators(df)
+                        trend = self.analysis.get_major_trend(df_indicators)
+
+                        rule_signal = self.signal_engine.get_rule_signal(df_indicators, trend)
+                        if rule_signal:
+                            now = datetime.now()
+                            if symbol in self.last_signal_time:
+                                if now - self.last_signal_time[symbol] < timedelta(minutes=90):
+                                    continue
+
+                            latest = df_indicators.iloc[-1]
+                            price = float(latest['close'])
+
+                            # ۱. ارسال سیگنال خام به کانال تلگرام
+                            channel_msg = (
+                                f"📢 **سیگنال جدید بازار (تحلیل تکنیکال)** 📢\n\n"
+                                f"💎 نماد: `{symbol}`\n"
+                                f"📊 سیگنال: **{rule_signal}**\n"
+                                f"💵 قیمت لحظه‌ای: `{price}`\n"
+                                f"📈 روند صعودی/نزولی: `{trend}`\n"
+                                f"⚡️ وضعیت: شناسایی و ارسال شده توسط ربات هوشمند"
+                            )
+                            TelegramNotifier.send_to_channel(channel_msg)
+
+                            # ۲. ارسال دستور معامله به همروش
+                            payload = {
+                                "action": "execute_trade",
+                                "symbol": symbol,
+                                "side": rule_signal,
+                                "price": price,
+                                "trend": trend
+                            }
+                            self.send_signal_to_hamravesh(payload)
+
+                            self.last_signal_time[symbol] = now
+
                     time.sleep(2)
                 except Exception as e:
                     logger.error(f"خطا در حلقه پردازش نماد {symbol}: {e}")
