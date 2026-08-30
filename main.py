@@ -49,7 +49,7 @@ class Config:
 
     def validate(self):
         if not self.TELEGRAM_BOT_TOKEN or (not self.TELEGRAM_CHANNEL_ID and not self.TELEGRAM_PERSONAL_ID):
-            print("هشدار: توکن یا آیدی‌های تلگرام به درستی تنظیم نشده‌اند.")
+            logger.warning("هشدار: توکن یا آیدی‌های تلگرام به درستی تنظیم نشده‌اند.")
 
 # ==================== لاگ ====================
 logging.basicConfig(
@@ -117,17 +117,18 @@ class SignalEngine:
 
         volume_confirmed = latest['volume'] > (latest['vol_sma'] * 0.50)
 
-        # منطق دقیق ورود بهینه‌شده
         if trend_4h in ["BULLISH", "NEUTRAL"]:
             ema_bull = latest['ema_fast'] > latest['ema_slow']
             rsi_buy = (latest['rsi'] > 42 and prev['rsi'] <= 42) or (48 <= latest['rsi'] <= 65 and latest['rsi'] > prev['rsi'])
             if ema_bull and rsi_buy and volume_confirmed:
+                logger.info(f"سیگنال خرید (BUY) با منطق بهینه‌شده شناسایی شد.")
                 return "BUY"
 
         if trend_4h in ["BEARISH", "NEUTRAL"]:
             ema_bear = latest['ema_fast'] < latest['ema_slow']
             rsi_sell = (latest['rsi'] < 58 and prev['rsi'] >= 58) or (35 <= latest['rsi'] <= 52 and latest['rsi'] < prev['rsi'])
             if ema_bear and rsi_sell and volume_confirmed:
+                logger.info(f"سیگنال فروش (SELL) با منطق بهینه‌شده شناسایی شد.")
                 return "SELL"
 
         return None
@@ -147,6 +148,7 @@ class TelegramNotifier:
                 "parse_mode": "Markdown"
             }
             requests.post(url, json=payload, timeout=10)
+            logger.info("پیام سیگنال با موفقیت به کانال تلگرام ارسال شد.")
         except Exception as e:
             logger.error(f"خطا در ارسال پیام به کانال تلگرام: {e}")
 
@@ -163,6 +165,7 @@ class TelegramNotifier:
                 "parse_mode": "Markdown"
             }
             requests.post(url, json=payload, timeout=10)
+            logger.info("پیام گزارش به پی‌وی تلگرام ارسال شد.")
         except Exception as e:
             logger.error(f"خطا در ارسال پیام به پی‌وی تلگرام: {e}")
 
@@ -180,6 +183,7 @@ class RenderWebhookHandler(BaseHTTPRequestHandler):
             config = Config()
             
             if config.SECRET_TOKEN and auth_token != config.SECRET_TOKEN:
+                logger.warning("تلاش برای دسترسی غیرمجاز به وب‌هوک رندر با توکن اشتباه.")
                 self.send_response(403)
                 self.end_headers()
                 return
@@ -208,6 +212,7 @@ class RenderWebhookHandler(BaseHTTPRequestHandler):
                 symbol = data.get("symbol")
                 exit_price = data.get("exit_price")
                 pnl = data.get("pnl")
+                logger.info(f"گزارش بسته شدن معامله دریافت شد: {symbol} | نتیجه: {pnl}%")
                 
                 emoji = "✅" if pnl >= 0 else "❌"
                 status_text = "سود" if pnl >= 0 else "زیان"
@@ -255,6 +260,7 @@ class PublicMarketDataFetcher:
                 'enableRateLimit': True,
                 'options': {'defaultType': 'spot'}
             })
+            logger.info(f"اتصال به صرافی {config.EXCHANGE_ID} با موفقیت برقرار شد.")
         except Exception as e:
             logger.error(f"خطا در ایجاد اتصال صرافی: {e}")
             self.exchange = None
@@ -271,7 +277,7 @@ class PublicMarketDataFetcher:
 
 def verify_and_notify_startup(config: Config):
     if not config.HAMRAVESH_WEBHOOK_URL:
-        logger.warning("آدرس وب‌هوک همروش تنظیم نشده است.")
+        logger.warning("آدرس وب‌هوک همروش تنظیم نشده است؛ اتصال کامل تایید نمی‌شود.")
         return
 
     max_retries = 10
@@ -279,15 +285,20 @@ def verify_and_notify_startup(config: Config):
 
     for attempt in range(1, max_retries + 1):
         try:
+            logger.info(f"تلاش {attempt}/{max_retries} برای بررسی اتصال چرخه کامل رندر <-> همروش...")
             headers = {"X-Secret-Token": config.SECRET_TOKEN}
             response = requests.post(config.HAMRAVESH_WEBHOOK_URL, json={"action": "ping"}, headers=headers, timeout=5)
+            
             if response.status_code == 200:
+                logger.info("اتصال چرخه کامل رندر و همروش با موفقیت برقرار شد و تایید گردید.")
                 startup_msg = "🚀 ربات هیبرید با موفقیت روشن شد: تمام چرخه‌ها (رندر، همروش، تحلیل و صرافی) کاملاً متصل و عملیاتی هستند."
                 TelegramNotifier.send_to_personal(startup_msg)
                 return
         except Exception as e:
-            pass
+            logger.warning(f"تلاش {attempt}: هنوز ارتباط کامل برقرار نشده است ({e})")
         time.sleep(delay)
+    
+    logger.error("خطا: چرخه‌های رندر و همروش به طور کامل متصل نشدند؛ پیام راه‌اندازی ارسال نگردید.")
 
 class RenderSignalSystem:
     def __init__(self):
@@ -305,11 +316,12 @@ class RenderSignalSystem:
         try:
             headers = {"X-Secret-Token": self.config.SECRET_TOKEN}
             requests.post(self.config.HAMRAVESH_WEBHOOK_URL, json=payload, headers=headers, timeout=15)
+            logger.info(f"سیگنال نماد {payload.get('symbol')} با موفقیت به همروش ارسال شد.")
         except Exception as e:
             logger.error(f"خطا در ارسال سیگنال به همروش: {e}")
 
     def run_loop(self):
-        logger.info("بخش رندر فعال شد.")
+        logger.info("بخش رندر (Render Signal Generator) با موفقیت فعال شد.")
         threading.Thread(target=verify_and_notify_startup, args=(self.config,), daemon=True).start()
 
         while self.running:
@@ -362,10 +374,12 @@ class RenderSignalSystem:
                     logger.error(f"خطا در حلقه پردازش نماد {symbol}: {e}")
 
             gc.collect()
+            logger.info(f"پایان چرخه بررسی بازار. انتظار برای دور بعدی ({self.config.CHECK_INTERVAL} ثانیه)...")
             time.sleep(self.config.CHECK_INTERVAL)
 
     def stop(self):
         self.running = False
+        logger.info("بخش رندر متوقف شد.")
 
 if __name__ == "__main__":
     system = RenderSignalSystem()
