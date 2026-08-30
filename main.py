@@ -185,9 +185,25 @@ class RenderWebhookHandler(BaseHTTPRequestHandler):
 
             content_length = int(self.headers.get('Content-Length', 0))
             post_data = self.rfile.read(content_length)
-            data = json.loads(post_data.decode('utf-8'))
             
+            # مدیریت درخواست‌های خالی یا ارور در بدنه
+            if not post_data:
+                self.send_response(200)
+                self.send_header("Content-type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "ok"}).encode('utf-8'))
+                return
+
+            data = json.loads(post_data.decode('utf-8'))
             action = data.get("action")
+
+            # پاسخ به پینگ تستی (برای جلوگیری از خطای 501 و سبز شدن مانیتور)
+            if action == "ping":
+                self.send_response(200)
+                self.send_header("Content-type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "pong"}).encode('utf-8'))
+                return
 
             # دریافت گزارش بسته شدن معامله و محاسبه سود/زیان واقعی از همروش
             if action == "close_trade":
