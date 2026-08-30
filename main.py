@@ -389,6 +389,22 @@ class RenderSignalSystem:
 
                             latest = df_15m_ind.iloc[-1]
                             price = float(latest['close'])
+                            atr = float(latest['atr']) if not pd.isna(latest['atr']) else price * 0.01
+
+                            if rule_signal == "BUY":
+                                stop_loss = min(float(latest['support']), price - (1.3 * atr))
+                                risk = price - stop_loss
+                                tp1 = round(price + (1.5 * risk), 4)
+                                tp2 = round(price + (2.5 * risk), 4)
+                                tp3 = round(price + (4.2 * risk), 4)
+                                stop_loss = round(stop_loss, 4)
+                            else:
+                                stop_loss = max(float(latest['resistance']), price + (1.3 * atr))
+                                risk = stop_loss - price
+                                tp1 = round(price - (1.5 * risk), 4)
+                                tp2 = round(price - (2.5 * risk), 4)
+                                tp3 = round(price - (4.2 * risk), 4)
+                                stop_loss = round(stop_loss, 4)
 
                             TelegramNotifier.send_to_channel(symbol, rule_signal, latest, trend)
 
@@ -397,7 +413,11 @@ class RenderSignalSystem:
                                 "symbol": symbol,
                                 "side": rule_signal,
                                 "price": price,
-                                "trend": trend
+                                "trend": trend,
+                                "tp1": tp1,
+                                "tp2": tp2,
+                                "tp3": tp3,
+                                "sl": stop_loss
                             }
                             self.send_signal_to_hamravesh(payload)
                             self.last_signal_time[symbol] = now
