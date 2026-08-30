@@ -136,11 +136,52 @@ class SignalEngine:
 # ==================== ارسال‌کننده پیام به تلگرام ====================
 class TelegramNotifier:
     @staticmethod
-    def send_to_channel(message: str):
+    def send_to_channel(symbol: str, side: str, latest: pd.Series, trend_4h: str):
         config = Config()
         if not config.TELEGRAM_BOT_TOKEN or not config.TELEGRAM_CHANNEL_ID:
             return
         try:
+            emoji = "🟢" if side == "BUY" else "🔴"
+            direction = "LONG" if side == "BUY" else "SHORT"
+            price = float(latest['close'])
+            atr = float(latest['atr']) if not pd.isna(latest['atr']) else price * 0.01
+
+            if side == "BUY":
+                stop_loss = min(float(latest['support']), price - (1.3 * atr))
+                risk = price - stop_loss
+                tp1 = round(price + (1.5 * risk), 4)
+                tp2 = round(price + (2.5 * risk), 4)
+                tp3 = round(price + (4.2 * risk), 4)
+                stop_loss = round(stop_loss, 4)
+                trailing_step = round(price + (1.0 * risk), 4)
+            else:
+                stop_loss = max(float(latest['resistance']), price + (1.3 * atr))
+                risk = stop_loss - price
+                tp1 = round(price - (1.5 * risk), 4)
+                tp2 = round(price - (2.5 * risk), 4)
+                tp3 = round(price - (4.2 * risk), 4)
+                stop_loss = round(stop_loss, 4)
+                trailing_step = round(price - (1.0 * risk), 4)
+
+            message = f"""
+{emoji} **ULTRA SIGNAL: {side} / {direction}**
+
+📍 **Symbol:** {symbol}
+⏱ **Timeframe:** {config.ENTRY_TIMEFRAME} (Trend 4H: {trend_4h})
+
+💵 **Entry Price:** {price:,}
+
+🎯 **Dynamic Targets:**
+  1️⃣ TP1: {tp1:,}
+  2️⃣ TP2: {tp2:,}
+  3️⃣ TP3 (Max Yield): {tp3:,}
+
+🛑 **Stop-Loss:** {stop_loss:,}
+⚙️ **Trailing Stop Trigger:** Move SL to Entry at {trailing_step:,}
+
+📊 **Metrics:** RSI: {latest['rsi']:.1f}
+⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}
+"""
             url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage"
             payload = {
                 "chat_id": config.TELEGRAM_CHANNEL_ID,
@@ -349,15 +390,7 @@ class RenderSignalSystem:
                             latest = df_15m_ind.iloc[-1]
                             price = float(latest['close'])
 
-                            channel_msg = (
-                                f"📢 **سیگنال جدید بازار (تحلیل تکنیکال)** 📢\n\n"
-                                f"💎 نماد: `{symbol}`\n"
-                                f"📊 سیگنال: **{rule_signal}**\n"
-                                f"💵 قیمت لحظه‌ای: `{price}`\n"
-                                f"📈 روند صعودی/نزولی: `{trend}`\n"
-                                f"⚡️ وضعیت: شناسایی و ارسال شده توسط ربات هوشمند"
-                            )
-                            TelegramNotifier.send_to_channel(channel_msg)
+                            TelegramNotifier.send_to_channel(symbol, rule_signal, latest, trend)
 
                             payload = {
                                 "action": "execute_trade",
