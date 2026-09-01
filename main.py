@@ -1,5 +1,5 @@
 # ==============================================
-# Hybrid Signal Bot - نسخه جامع (V5 Ultimate Pro)
+# Hybrid Signal Bot - نسخه جامع (V5 Ultimate Pro - بدون هوش مصنوعی)
 # ==============================================
 import os
 import time
@@ -13,7 +13,6 @@ from datetime import datetime, timedelta
 from typing import Dict, Optional, List
 import pandas as pd
 import ccxt
-from openai import OpenAI
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -51,10 +50,6 @@ class Config:
     SECRET = os.getenv("EXCHANGE_SECRET", "")
     PASSWORD = os.getenv("EXCHANGE_PASSWORD", "")
 
-    AI_API_KEY = os.getenv("AI_API_KEY")
-    AI_BASE_URL = os.getenv("AI_BASE_URL", "https://api.x.ai/v1")
-    AI_MODEL = os.getenv("AI_MODEL", "grok-3")
-
     TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
     TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
     PERSONAL_CHAT_ID = os.getenv("PERSONAL_CHAT_ID")
@@ -75,11 +70,9 @@ class Config:
     ENTRY_TIMEFRAME = "15m"
     TREND_TIMEFRAME = "4h"
     CHECK_INTERVAL = 300
-    MIN_CONFIDENCE_AI = 0.80
 
     def validate(self):
         required = {
-            "AI_API_KEY": self.AI_API_KEY,
             "TELEGRAM_BOT_TOKEN": self.TELEGRAM_BOT_TOKEN,
             "TELEGRAM_CHAT_ID": self.TELEGRAM_CHAT_ID,
         }
@@ -120,10 +113,6 @@ class DataLayer:
 class AnalysisLayer:
     def __init__(self, config: Config):
         self.config = config
-        self.client = OpenAI(
-            api_key=config.AI_API_KEY,
-            base_url=config.AI_BASE_URL
-        )
 
     def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         df = df.copy()
@@ -157,41 +146,6 @@ class AnalysisLayer:
         elif latest['close'] < latest['ema_trend'] and latest['ema_fast'] < latest['ema_slow']:
             return "BEARISH"
         return "NEUTRAL"
-
-    def get_ai_confirmation(self, symbol: str, side: str, df: pd.DataFrame, trend: str) -> Dict:
-        latest = df.iloc[-1]
-        prev = df.iloc[-2]
-
-        prompt = f"""
-You are an elite quantitative crypto trader.
-Context:
-- Symbol: {symbol}
-- Trade Side: {side}
-- Higher Timeframe (4H) Trend: {trend}
-- 15m Close: {latest['close']}
-- RSI: {latest['rsi']:.1f}
-- EMA20/50: {latest['ema_fast']:.2f} / {latest['ema_slow']:.2f}
-- ATR Volatility: {latest['atr']:.4f}
-- Volume ratio: {latest['volume']/latest['vol_sma']:.2f}x
-
-Assign a final score (60 to 95) evaluating if this signal matches high-probability criteria.
-Output ONLY the integer score.
-"""
-        try:
-            response = self.client.chat.completions.create(
-                model=self.config.AI_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.1,
-                max_tokens=6
-            )
-            answer = response.choices[0].message.content.strip()
-            score = float(''.join(filter(str.isdigit, answer))) / 100.0
-            if score < 0.60 or score > 0.98:
-                score = 0.82
-            return {"confidence": score}
-        except Exception as e:
-            logger.error(f"خطای AI برای {symbol}: {e}")
-            return {"confidence": 0.80}
 
 # ==================== موتور سیگنال ====================
 class SignalEngine:
@@ -266,20 +220,16 @@ class PaperTrader:
                 latest_high = float(df['high'].max())
                 latest_low = float(df['low'].min())
 
-                symbol = trade['symbol']
                 side = trade['side']
                 entry = trade['entry']
 
                 # ----------------- بررسی پوزیشن خرید (BUY) -----------------
                 if side == "BUY":
-                    # ۱. حد زیان
                     if latest_low <= trade['sl']:
                         pnl = ((trade['sl'] - entry) / entry) * 100
                         self._send_close_report(trade, pnl)
                         del self.active_trades[trade_id]
                         continue
-
-                    # ۲. رسیدن به تارگت اول (خروج با سود)
                     elif latest_high >= trade['tp1']:
                         pnl = ((trade['tp1'] - entry) / entry) * 100
                         self._send_close_report(trade, pnl)
@@ -288,14 +238,11 @@ class PaperTrader:
 
                 # ----------------- بررسی پوزیشن فروش (SELL) -----------------
                 elif side == "SELL":
-                    # ۱. حد زیان
                     if latest_high >= trade['sl']:
                         pnl = ((entry - trade['sl']) / entry) * 100
                         self._send_close_report(trade, pnl)
                         del self.active_trades[trade_id]
                         continue
-
-                    # ۲. رسیدن به تارگت اول (خروج با سود)
                     elif latest_low <= trade['tp1']:
                         pnl = ((entry - trade['tp1']) / entry) * 100
                         self._send_close_report(trade, pnl)
@@ -352,7 +299,7 @@ class TelegramSender:
         except Exception as e:
             logger.error(f"خطای ارسال پیام شخصی به تلگرام: {e}")
 
-    def send_signal(self, symbol: str, side: str, latest: pd.Series, confidence: float, trend_4h: str) -> Dict:
+    def send_signal(self, symbol: str, side: str, latest: pd.Series, trend_4h: str) -> Dict:
         emoji = "🟢" if side == "BUY" else "🔴"
         direction = "LONG" if side == "BUY" else "SHORT"
         price = float(latest['close'])
@@ -391,7 +338,7 @@ class TelegramSender:
 🛑 **Stop-Loss:** {stop_loss:,}
 ⚙️ **Trailing Stop Trigger:** Move SL to Entry at {trailing_step:,}
 
-📊 **Metrics:** RSI: {latest['rsi']:.1f} | AI Score: {confidence:.0%}
+📊 **Metrics:** RSI: {latest['rsi']:.1f} | Technical Strategy
 ⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}
 """
         try:
@@ -450,23 +397,21 @@ class HybridTradingSystem:
                     return
 
             latest = df_15m.iloc[-1]
-            ai_result = self.analysis.get_ai_confirmation(symbol, rule_signal, df_15m, trend_4h)
+            
+            trade_data = self.telegram.send_signal(symbol, rule_signal, latest, trend_4h)
+            
+            if trade_data:
+                self.paper_trader.open_virtual_trade(
+                    symbol=symbol,
+                    side=rule_signal,
+                    entry_price=trade_data["price"],
+                    tp1=trade_data["tp1"],
+                    tp2=trade_data["tp2"],
+                    tp3=trade_data["tp3"],
+                    sl=trade_data["sl"]
+                )
 
-            if ai_result["confidence"] >= self.config.MIN_CONFIDENCE_AI:
-                trade_data = self.telegram.send_signal(symbol, rule_signal, latest, ai_result["confidence"], trend_4h)
-                
-                if trade_data:
-                    self.paper_trader.open_virtual_trade(
-                        symbol=symbol,
-                        side=rule_signal,
-                        entry_price=trade_data["price"],
-                        tp1=trade_data["tp1"],
-                        tp2=trade_data["tp2"],
-                        tp3=trade_data["tp3"],
-                        sl=trade_data["sl"]
-                    )
-
-                self.last_signal_time[symbol] = now
+            self.last_signal_time[symbol] = now
 
         except Exception as e:
             logger.error(f"خطا در پردازش {symbol}: {e}")
