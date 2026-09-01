@@ -1,9 +1,10 @@
 # ==============================================
-# Hybrid Signal Bot - نسخه رندر (Render: دریافت، تحلیل، ارسال به کانال و همروش)
+# Hybrid Signal Bot - نسخه جامع (V5 Ultimate Pro)
 # ==============================================
 import os
 import time
 import logging
+import requests
 import gc
 import json
 import threading
@@ -12,10 +13,36 @@ from datetime import datetime, timedelta
 from typing import Dict, Optional, List
 import pandas as pd
 import ccxt
-import requests
+from openai import OpenAI
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# ==================== وب‌سرور استاندارد ====================
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/html; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"Bot is alive and running!")
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/html; charset=utf-8")
+        self.end_headers()
+
+    def log_message(self, format, *args):
+        return
+
+def start_health_check_server():
+    port = int(os.environ.get("PORT", 10000))
+    try:
+        server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+        server.serve_forever()
+    except Exception as e:
+        logger.error(f"خطا در اجرای وب‌سرور: {e}")
+
+threading.Thread(target=start_health_check_server, daemon=True).start()
 
 # ==================== تنظیمات ====================
 class Config:
@@ -24,11 +51,13 @@ class Config:
     SECRET = os.getenv("EXCHANGE_SECRET", "")
     PASSWORD = os.getenv("EXCHANGE_PASSWORD", "")
 
-    TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-    TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID", "")    # مخصوص کانال (سیگنال‌های خام)
-    TELEGRAM_PERSONAL_ID = os.getenv("TELEGRAM_PERSONAL_ID", "") # مخصوص پی‌وی (نتیجه معاملات)
-    HAMRAVESH_WEBHOOK_URL = os.getenv("HAMRAVESH_WEBHOOK_URL", "")
-    SECRET_TOKEN = os.getenv("SECRET_TOKEN", "")
+    AI_API_KEY = os.getenv("AI_API_KEY")
+    AI_BASE_URL = os.getenv("AI_BASE_URL", "https://api.x.ai/v1")
+    AI_MODEL = os.getenv("AI_MODEL", "grok-3")
+
+    TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+    TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+    PERSONAL_CHAT_ID = os.getenv("PERSONAL_CHAT_ID")
 
     SYMBOLS = [
         "BTC/USDT",
@@ -45,27 +74,56 @@ class Config:
 
     ENTRY_TIMEFRAME = "15m"
     TREND_TIMEFRAME = "4h"
-    CHECK_INTERVAL = 300  # هر ۵ دقیقه یک‌بار
+    CHECK_INTERVAL = 300
+    MIN_CONFIDENCE_AI = 0.80
 
     def validate(self):
-        if not self.TELEGRAM_BOT_TOKEN or (not self.TELEGRAM_CHANNEL_ID and not self.TELEGRAM_PERSONAL_ID):
-            logger.warning("هشدار: توکن یا آیدی‌های تلگرام به درستی تنظیم نشده‌اند.")
+        required = {
+            "AI_API_KEY": self.AI_API_KEY,
+            "TELEGRAM_BOT_TOKEN": self.TELEGRAM_BOT_TOKEN,
+            "TELEGRAM_CHAT_ID": self.TELEGRAM_CHAT_ID,
+        }
+        missing = [key for key, value in required.items() if not value]
+        if missing:
+            raise ValueError(f"این متغیرهای محیطی تنظیم نشدن: {', '.join(missing)}")
 
 # ==================== لاگ ====================
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s | %(levelname)s | %(message)s',
     handlers=[
-        logging.FileHandler("render_bot.log", encoding='utf-8'),
+        logging.FileHandler("trading_signals.log", encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
 
-# ==================== لایه تحلیل تکنیکال ====================
+# ==================== لایه داده ====================
+class DataLayer:
+    def __init__(self, config: Config):
+        self.config = config
+        exchange_class = getattr(ccxt, config.EXCHANGE_ID)
+        self.exchange = exchange_class({
+            'apiKey': config.API_KEY,
+            'secret': config.SECRET,
+            'enableRateLimit': True,
+            'options': {'defaultType': 'spot'}
+        })
+
+    def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 100) -> pd.DataFrame:
+        ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        return df
+
+# ==================== لایه تحلیل ====================
 class AnalysisLayer:
     def __init__(self, config: Config):
         self.config = config
+        self.client = OpenAI(
+            api_key=config.AI_API_KEY,
+            base_url=config.AI_BASE_URL
+        )
 
     def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         df = df.copy()
@@ -92,15 +150,50 @@ class AnalysisLayer:
 
         return df
 
-    def get_major_trend(self, df_trend: pd.DataFrame) -> str:
-        latest = df_trend.iloc[-1]
+    def get_major_trend(self, df_4h: pd.DataFrame) -> str:
+        latest = df_4h.iloc[-1]
         if latest['close'] > latest['ema_trend'] and latest['ema_fast'] > latest['ema_slow']:
             return "BULLISH"
         elif latest['close'] < latest['ema_trend'] and latest['ema_fast'] < latest['ema_slow']:
             return "BEARISH"
         return "NEUTRAL"
 
-# ==================== موتور سیگنال (بهینه‌شده V5) ====================
+    def get_ai_confirmation(self, symbol: str, side: str, df: pd.DataFrame, trend: str) -> Dict:
+        latest = df.iloc[-1]
+        prev = df.iloc[-2]
+
+        prompt = f"""
+You are an elite quantitative crypto trader.
+Context:
+- Symbol: {symbol}
+- Trade Side: {side}
+- Higher Timeframe (4H) Trend: {trend}
+- 15m Close: {latest['close']}
+- RSI: {latest['rsi']:.1f}
+- EMA20/50: {latest['ema_fast']:.2f} / {latest['ema_slow']:.2f}
+- ATR Volatility: {latest['atr']:.4f}
+- Volume ratio: {latest['volume']/latest['vol_sma']:.2f}x
+
+Assign a final score (60 to 95) evaluating if this signal matches high-probability criteria.
+Output ONLY the integer score.
+"""
+        try:
+            response = self.client.chat.completions.create(
+                model=self.config.AI_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.1,
+                max_tokens=6
+            )
+            answer = response.choices[0].message.content.strip()
+            score = float(''.join(filter(str.isdigit, answer))) / 100.0
+            if score < 0.60 or score > 0.98:
+                score = 0.82
+            return {"confidence": score}
+        except Exception as e:
+            logger.error(f"خطای AI برای {symbol}: {e}")
+            return {"confidence": 0.80}
+
+# ==================== موتور سیگنال ====================
 class SignalEngine:
     def __init__(self, config: Config):
         self.config = config
@@ -121,53 +214,172 @@ class SignalEngine:
             ema_bull = latest['ema_fast'] > latest['ema_slow']
             rsi_buy = (latest['rsi'] > 42 and prev['rsi'] <= 42) or (48 <= latest['rsi'] <= 65 and latest['rsi'] > prev['rsi'])
             if ema_bull and rsi_buy and volume_confirmed:
-                logger.info(f"سیگنال خرید (BUY) با منطق بهینه‌شده شناسایی شد.")
                 return "BUY"
 
         if trend_4h in ["BEARISH", "NEUTRAL"]:
             ema_bear = latest['ema_fast'] < latest['ema_slow']
             rsi_sell = (latest['rsi'] < 58 and prev['rsi'] >= 58) or (35 <= latest['rsi'] <= 52 and latest['rsi'] < prev['rsi'])
             if ema_bear and rsi_sell and volume_confirmed:
-                logger.info(f"سیگنال فروش (SELL) با منطق بهینه‌شده شناسایی شد.")
                 return "SELL"
 
         return None
 
-# ==================== ارسال‌کننده پیام به تلگرام ====================
-class TelegramNotifier:
-    @staticmethod
-    def send_to_channel(symbol: str, side: str, latest: pd.Series, trend_4h: str):
-        config = Config()
-        if not config.TELEGRAM_BOT_TOKEN or not config.TELEGRAM_CHANNEL_ID:
-            return
+# ==================== ماژول معامله مجازی (Paper Trading) ====================
+class PaperTrader:
+    def __init__(self, config: Config, telegram_sender):
+        self.config = config
+        self.telegram = telegram_sender
+        self.file_path = "paper_trades.json"
+        self.active_trades = self._load_trades()
+
+    def _load_trades(self) -> Dict:
+        if os.path.exists(self.file_path):
+            try:
+                with open(self.file_path, "r") as f:
+                    return json.load(f)
+            except Exception:
+                return {}
+        return {}
+
+    def _save_trades(self):
+        with open(self.file_path, "w") as f:
+            json.dump(self.active_trades, f, indent=4)
+
+    def open_virtual_trade(self, symbol: str, side: str, entry_price: float, tp1: float, tp2: float, tp3: float, sl: float):
+        trade_id = f"{symbol}_{int(time.time())}"
+        self.active_trades[trade_id] = {
+            "symbol": symbol,
+            "side": side,
+            "entry": entry_price,
+            "tp1": tp1,
+            "tp2": tp2,
+            "tp3": tp3,
+            "sl": sl,
+            "open_time": datetime.now().strftime('%Y-%m-%d %H:%M')
+        }
+        self._save_trades()
+
+    def update_and_check_trades(self, data_layer: DataLayer):
+        for trade_id, trade in list(self.active_trades.items()):
+            try:
+                df = data_layer.fetch_ohlcv(trade['symbol'], timeframe="1m", limit=5)
+                latest_high = float(df['high'].max())
+                latest_low = float(df['low'].min())
+
+                symbol = trade['symbol']
+                side = trade['side']
+                entry = trade['entry']
+
+                # ----------------- بررسی پوزیشن خرید (BUY) -----------------
+                if side == "BUY":
+                    # ۱. حد زیان
+                    if latest_low <= trade['sl']:
+                        pnl = ((trade['sl'] - entry) / entry) * 100
+                        self._send_close_report(trade, pnl)
+                        del self.active_trades[trade_id]
+                        continue
+
+                    # ۲. رسیدن به تارگت اول (خروج با سود)
+                    elif latest_high >= trade['tp1']:
+                        pnl = ((trade['tp1'] - entry) / entry) * 100
+                        self._send_close_report(trade, pnl)
+                        del self.active_trades[trade_id]
+                        continue
+
+                # ----------------- بررسی پوزیشن فروش (SELL) -----------------
+                elif side == "SELL":
+                    # ۱. حد زیان
+                    if latest_high >= trade['sl']:
+                        pnl = ((entry - trade['sl']) / entry) * 100
+                        self._send_close_report(trade, pnl)
+                        del self.active_trades[trade_id]
+                        continue
+
+                    # ۲. رسیدن به تارگت اول (خروج با سود)
+                    elif latest_low <= trade['tp1']:
+                        pnl = ((entry - trade['tp1']) / entry) * 100
+                        self._send_close_report(trade, pnl)
+                        del self.active_trades[trade_id]
+                        continue
+
+            except Exception as e:
+                logger.error(f"خطا در بروزرسانی معامله مجازی {trade_id}: {e}")
+
+        self._save_trades()
+
+    def _send_close_report(self, trade: Dict, pnl: float):
+        emoji = "✅" if pnl > 0 else "❌"
+        msg = f"""
+{emoji} **معامله بسته شد**
+
+📌 **ارز:** {trade['symbol']} ({trade['side']})
+📈 **سود/زیان:** {pnl:+.2f}%
+"""
+        self.telegram.send_personal_message(msg)
+
+# ==================== ارسال تلگرام ====================
+class TelegramSender:
+    def __init__(self, config: Config):
+        self.config = config
+        self.base_url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}"
+
+    def send_system_status(self, text: str):
         try:
-            emoji = "🟢" if side == "BUY" else "🔴"
-            direction = "LONG" if side == "BUY" else "SHORT"
-            price = float(latest['close'])
-            atr = float(latest['atr']) if not pd.isna(latest['atr']) else price * 0.01
+            requests.post(
+                f"{self.base_url}/sendMessage",
+                json={
+                    "chat_id": self.config.TELEGRAM_CHAT_ID,
+                    "text": text,
+                    "parse_mode": "Markdown"
+                },
+                timeout=10
+            )
+        except Exception as e:
+            logger.error(f"خطای ارسال پیام به تلگرام: {e}")
 
-            if side == "BUY":
-                stop_loss = min(float(latest['support']), price - (1.3 * atr))
-                risk = price - stop_loss
-                tp1 = round(price + (1.5 * risk), 4)
-                tp2 = round(price + (2.5 * risk), 4)
-                tp3 = round(price + (4.2 * risk), 4)
-                stop_loss = round(stop_loss, 4)
-                trailing_step = round(price + (1.0 * risk), 4)
-            else:
-                stop_loss = max(float(latest['resistance']), price + (1.3 * atr))
-                risk = stop_loss - price
-                tp1 = round(price - (1.5 * risk), 4)
-                tp2 = round(price - (2.5 * risk), 4)
-                tp3 = round(price - (4.2 * risk), 4)
-                stop_loss = round(stop_loss, 4)
-                trailing_step = round(price - (1.0 * risk), 4)
+    def send_personal_message(self, text: str):
+        target_id = self.config.PERSONAL_CHAT_ID or self.config.TELEGRAM_CHAT_ID
+        try:
+            requests.post(
+                f"{self.base_url}/sendMessage",
+                json={
+                    "chat_id": target_id,
+                    "text": text,
+                    "parse_mode": "Markdown"
+                },
+                timeout=10
+            )
+        except Exception as e:
+            logger.error(f"خطای ارسال پیام شخصی به تلگرام: {e}")
 
-            message = f"""
+    def send_signal(self, symbol: str, side: str, latest: pd.Series, confidence: float, trend_4h: str) -> Dict:
+        emoji = "🟢" if side == "BUY" else "🔴"
+        direction = "LONG" if side == "BUY" else "SHORT"
+        price = float(latest['close'])
+        atr = float(latest['atr']) if not pd.isna(latest['atr']) else price * 0.01
+
+        if side == "BUY":
+            stop_loss = min(float(latest['support']), price - (1.3 * atr))
+            risk = price - stop_loss
+            tp1 = round(price + (1.5 * risk), 4)
+            tp2 = round(price + (2.5 * risk), 4)
+            tp3 = round(price + (4.2 * risk), 4)
+            stop_loss = round(stop_loss, 4)
+            trailing_step = round(price + (1.0 * risk), 4)
+        else:
+            stop_loss = max(float(latest['resistance']), price + (1.3 * atr))
+            risk = stop_loss - price
+            tp1 = round(price - (1.5 * risk), 4)
+            tp2 = round(price - (2.5 * risk), 4)
+            tp3 = round(price - (4.2 * risk), 4)
+            stop_loss = round(stop_loss, 4)
+            trailing_step = round(price - (1.0 * risk), 4)
+
+        message = f"""
 {emoji} **ULTRA SIGNAL: {side} / {direction}**
 
 📍 **Symbol:** {symbol}
-⏱ **Timeframe:** {config.ENTRY_TIMEFRAME} (Trend 4H: {trend_4h})
+⏱ **Timeframe:** {self.config.ENTRY_TIMEFRAME} (Trend 4H: {trend_4h})
 
 💵 **Entry Price:** {price:,}
 
@@ -179,264 +391,111 @@ class TelegramNotifier:
 🛑 **Stop-Loss:** {stop_loss:,}
 ⚙️ **Trailing Stop Trigger:** Move SL to Entry at {trailing_step:,}
 
-📊 **Metrics:** RSI: {latest['rsi']:.1f}
+📊 **Metrics:** RSI: {latest['rsi']:.1f} | AI Score: {confidence:.0%}
 ⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}
 """
-            url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage"
-            payload = {
-                "chat_id": config.TELEGRAM_CHANNEL_ID,
-                "text": message,
-                "parse_mode": "Markdown"
+        try:
+            requests.post(
+                f"{self.base_url}/sendMessage",
+                json={
+                    "chat_id": self.config.TELEGRAM_CHAT_ID,
+                    "text": message,
+                    "parse_mode": "Markdown"
+                },
+                timeout=10
+            )
+            logger.info(f"سیگنال فوق‌پیشرفته {side} برای {symbol} ارسال شد")
+            
+            return {
+                "price": price,
+                "tp1": tp1,
+                "tp2": tp2,
+                "tp3": tp3,
+                "sl": stop_loss
             }
-            requests.post(url, json=payload, timeout=10)
-            logger.info("پیام سیگنال با موفقیت به کانال تلگرام ارسال شد.")
         except Exception as e:
-            logger.error(f"خطا در ارسال پیام به کانال تلگرام: {e}")
+            logger.error(f"خطای ارسال تلگرام: {e}")
+            return None
 
-    @staticmethod
-    def send_to_personal(message: str):
-        config = Config()
-        if not config.TELEGRAM_BOT_TOKEN or not config.TELEGRAM_PERSONAL_ID:
-            return
-        try:
-            url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage"
-            payload = {
-                "chat_id": config.TELEGRAM_PERSONAL_ID,
-                "text": message,
-                "parse_mode": "Markdown"
-            }
-            requests.post(url, json=payload, timeout=10)
-            logger.info("پیام گزارش به پی‌وی تلگرام ارسال شد.")
-        except Exception as e:
-            logger.error(f"خطا در ارسال پیام به پی‌وی تلگرام: {e}")
-
-# ==================== وب‌سرور رندر ====================
-class RenderWebhookHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-type", "text/html; charset=utf-8")
-        self.end_headers()
-        self.wfile.write(b"Render Signal Generator is alive and running!")
-
-    def do_POST(self):
-        try:
-            auth_token = self.headers.get("X-Secret-Token")
-            config = Config()
-            
-            if config.SECRET_TOKEN and auth_token != config.SECRET_TOKEN:
-                logger.warning("تلاش برای دسترسی غیرمجاز به وب‌هوک رندر با توکن اشتباه.")
-                self.send_response(403)
-                self.end_headers()
-                return
-
-            content_length = int(self.headers.get('Content-Length', 0))
-            post_data = self.rfile.read(content_length)
-            
-            if not post_data:
-                self.send_response(200)
-                self.send_header("Content-type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps({"status": "ok"}).encode('utf-8'))
-                return
-
-            data = json.loads(post_data.decode('utf-8'))
-            action = data.get("action")
-
-            if action == "ping":
-                self.send_response(200)
-                self.send_header("Content-type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps({"status": "pong"}).encode('utf-8'))
-                return
-
-            if action == "close_trade":
-                symbol = data.get("symbol")
-                exit_price = data.get("exit_price")
-                pnl = data.get("pnl")
-                logger.info(f"گزارش بسته شدن معامله دریافت شد: {symbol} | نتیجه: {pnl}%")
-                
-                emoji = "✅" if pnl >= 0 else "❌"
-                status_text = "سود" if pnl >= 0 else "زیان"
-                
-                close_msg = (
-                    f"{emoji} **گزارش نتیجه نهایی معامله (اسپات)** {emoji}\n\n"
-                    f"💎 نماد: `{symbol}`\n"
-                    f"💵 قیمت خروج: `{exit_price}`\n"
-                    f"📊 نتیجه: **{status_text} با {pnl:+.2f}%**\n"
-                    f"🏷 صرافی: `تبدیل (Tabdeal)`"
-                )
-                TelegramNotifier.send_to_personal(close_msg)
-
-            self.send_response(200)
-            self.send_header("Content-type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps({"status": "received"}).encode('utf-8'))
-
-        except Exception as e:
-            logger.error(f"خطا در پردازش وب‌هوک برگشتی در رندر: {e}")
-            self.send_response(500)
-            self.end_headers()
-
-    def log_message(self, format, *args):
-        return
-
-def start_render_server():
-    port = int(os.environ.get("PORT", 10000))
-    try:
-        server = HTTPServer(("0.0.0.0", port), RenderWebhookHandler)
-        server.serve_forever()
-    except Exception as e:
-        logger.error(f"خطا در اجرای وب‌سرور رندر: {e}")
-
-threading.Thread(target=start_render_server, daemon=True).start()
-
-# ==================== صرافی (کوین‌اکس) ====================
-class PublicMarketDataFetcher:
-    def __init__(self, config: Config):
-        try:
-            exchange_class = getattr(ccxt, config.EXCHANGE_ID)
-            self.exchange = exchange_class({
-                'apiKey': config.API_KEY,
-                'secret': config.SECRET,
-                'enableRateLimit': True,
-                'options': {'defaultType': 'spot'}
-            })
-            logger.info(f"اتصال به صرافی {config.EXCHANGE_ID} با موفقیت برقرار شد.")
-        except Exception as e:
-            logger.error(f"خطا در ایجاد اتصال صرافی: {e}")
-            self.exchange = None
-
-    def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 100) -> list:
-        if not self.exchange:
-            return []
-        try:
-            ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
-            return ohlcv
-        except Exception as e:
-            logger.error(f"خطا در دریافت کندل‌های {symbol} ({timeframe}): {e}")
-            return []
-
-def verify_and_notify_startup(config: Config):
-    if not config.HAMRAVESH_WEBHOOK_URL:
-        logger.warning("آدرس وب‌هوک همروش تنظیم نشده است؛ اتصال کامل تایید نمی‌شود.")
-        return
-
-    max_retries = 10
-    delay = 6
-
-    for attempt in range(1, max_retries + 1):
-        try:
-            logger.info(f"تلاش {attempt}/{max_retries} برای بررسی اتصال چرخه کامل رندر <-> همروش...")
-            headers = {"X-Secret-Token": config.SECRET_TOKEN}
-            response = requests.post(config.HAMRAVESH_WEBHOOK_URL, json={"action": "ping"}, headers=headers, timeout=5)
-            
-            if response.status_code == 200:
-                logger.info("اتصال چرخه کامل رندر و همروش با موفقیت برقرار شد و تایید گردید.")
-                startup_msg = "🚀 ربات هیبرید با موفقیت روشن شد: تمام چرخه‌ها (رندر، همروش، تحلیل و صرافی) کاملاً متصل و عملیاتی هستند."
-                TelegramNotifier.send_to_personal(startup_msg)
-                return
-        except Exception as e:
-            logger.warning(f"تلاش {attempt}: هنوز ارتباط کامل برقرار نشده است ({e})")
-        time.sleep(delay)
-    
-    logger.error("خطا: چرخه‌های رندر و همروش به طور کامل متصل نشدند؛ پیام راه‌اندازی ارسال نگردید.")
-
-class RenderSignalSystem:
+# ==================== سیستم اصلی ====================
+class HybridTradingSystem:
     def __init__(self):
         self.config = Config()
         self.config.validate()
-        self.data_fetcher = PublicMarketDataFetcher(self.config)
+        self.data = DataLayer(self.config)
         self.analysis = AnalysisLayer(self.config)
         self.signal_engine = SignalEngine(self.config)
+        self.telegram = TelegramSender(self.config)
+        self.paper_trader = PaperTrader(self.config, self.telegram)
         self.running = True
         self.last_signal_time: Dict[str, datetime] = {}
 
-    def send_signal_to_hamravesh(self, payload: dict):
-        if not self.config.HAMRAVESH_WEBHOOK_URL:
-            return
+    def process_symbol(self, symbol: str):
         try:
-            headers = {"X-Secret-Token": self.config.SECRET_TOKEN}
-            requests.post(self.config.HAMRAVESH_WEBHOOK_URL, json=payload, headers=headers, timeout=15)
-            logger.info(f"سیگنال نماد {payload.get('symbol')} با موفقیت به همروش ارسال شد.")
-        except Exception as e:
-            logger.error(f"خطا در ارسال سیگنال به همروش: {e}")
+            df_15m = self.data.fetch_ohlcv(symbol, timeframe=self.config.ENTRY_TIMEFRAME)
+            df_15m = self.analysis.calculate_indicators(df_15m)
 
-    def run_loop(self):
-        logger.info("بخش رندر (Render Signal Generator) با موفقیت فعال شد.")
-        threading.Thread(target=verify_and_notify_startup, args=(self.config,), daemon=True).start()
+            df_4h = self.data.fetch_ohlcv(symbol, timeframe=self.config.TREND_TIMEFRAME)
+            df_4h = self.analysis.calculate_indicators(df_4h)
+
+            trend_4h = self.analysis.get_major_trend(df_4h)
+
+            rule_signal = self.signal_engine.get_rule_signal(df_15m, trend_4h)
+            if not rule_signal:
+                return
+
+            now = datetime.now()
+            if symbol in self.last_signal_time:
+                if now - self.last_signal_time[symbol] < timedelta(minutes=90):
+                    return
+
+            latest = df_15m.iloc[-1]
+            ai_result = self.analysis.get_ai_confirmation(symbol, rule_signal, df_15m, trend_4h)
+
+            if ai_result["confidence"] >= self.config.MIN_CONFIDENCE_AI:
+                trade_data = self.telegram.send_signal(symbol, rule_signal, latest, ai_result["confidence"], trend_4h)
+                
+                if trade_data:
+                    self.paper_trader.open_virtual_trade(
+                        symbol=symbol,
+                        side=rule_signal,
+                        entry_price=trade_data["price"],
+                        tp1=trade_data["tp1"],
+                        tp2=trade_data["tp2"],
+                        tp3=trade_data["tp3"],
+                        sl=trade_data["sl"]
+                    )
+
+                self.last_signal_time[symbol] = now
+
+        except Exception as e:
+            logger.error(f"خطا در پردازش {symbol}: {e}")
+
+    def run_once(self):
+        logger.info("----- شروع آنالیز پیشرفته بازار -----")
+        for symbol in self.config.SYMBOLS:
+            self.process_symbol(symbol)
+            time.sleep(1.5)
+            
+        self.paper_trader.update_and_check_trades(self.data)
+
+    def start(self):
+        logger.info("بات V5 Ultimate Pro فعال شد")
+        start_message = "⚡️ **نسخه جامع V5 Ultimate Pro فعال شد.**\n\nسیستم با تحلیل چند تایم‌فریم (MTF) و تریلینگ استاپ آماده‌سازی شد."
+        self.telegram.send_system_status(start_message)
 
         while self.running:
-            for symbol in self.config.SYMBOLS:
-                try:
-                    ohlcv_15m = self.data_fetcher.fetch_ohlcv(symbol, self.config.ENTRY_TIMEFRAME, limit=120)
-                    ohlcv_4h = self.data_fetcher.fetch_ohlcv(symbol, self.config.TREND_TIMEFRAME, limit=60)
-                    
-                    if ohlcv_15m and len(ohlcv_15m) >= 50 and ohlcv_4h and len(ohlcv_4h) >= 30:
-                        df_15m = pd.DataFrame(ohlcv_15m, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                        df_4h = pd.DataFrame(ohlcv_4h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                        
-                        df_15m_ind = self.analysis.calculate_indicators(df_15m)
-                        df_4h_ind = self.analysis.calculate_indicators(df_4h)
-                        
-                        trend = self.analysis.get_major_trend(df_4h_ind)
-                        rule_signal = self.signal_engine.get_rule_signal(df_15m_ind, trend)
-
-                        if rule_signal:
-                            now = datetime.now()
-                            if symbol in self.last_signal_time:
-                                if now - self.last_signal_time[symbol] < timedelta(minutes=90):
-                                    continue
-
-                            latest = df_15m_ind.iloc[-1]
-                            price = float(latest['close'])
-                            atr = float(latest['atr']) if not pd.isna(latest['atr']) else price * 0.01
-
-                            if rule_signal == "BUY":
-                                stop_loss = min(float(latest['support']), price - (1.3 * atr))
-                                risk = price - stop_loss
-                                tp1 = round(price + (1.5 * risk), 4)
-                                tp2 = round(price + (2.5 * risk), 4)
-                                tp3 = round(price + (4.2 * risk), 4)
-                                stop_loss = round(stop_loss, 4)
-                            else:
-                                stop_loss = max(float(latest['resistance']), price + (1.3 * atr))
-                                risk = stop_loss - price
-                                tp1 = round(price - (1.5 * risk), 4)
-                                tp2 = round(price - (2.5 * risk), 4)
-                                tp3 = round(price - (4.2 * risk), 4)
-                                stop_loss = round(stop_loss, 4)
-
-                            TelegramNotifier.send_to_channel(symbol, rule_signal, latest, trend)
-
-                            payload = {
-                                "action": "execute_trade",
-                                "symbol": symbol,
-                                "side": rule_signal,
-                                "price": price,
-                                "trend": trend,
-                                "tp1": tp1,
-                                "tp2": tp2,
-                                "tp3": tp3,
-                                "sl": stop_loss
-                            }
-                            self.send_signal_to_hamravesh(payload)
-                            self.last_signal_time[symbol] = now
-
-                    time.sleep(2)
-                except Exception as e:
-                    logger.error(f"خطا در حلقه پردازش نماد {symbol}: {e}")
-
+            self.run_once()
             gc.collect()
-            logger.info(f"پایان چرخه بررسی بازار. انتظار برای دور بعدی ({self.config.CHECK_INTERVAL} ثانیه)...")
             time.sleep(self.config.CHECK_INTERVAL)
 
     def stop(self):
         self.running = False
-        logger.info("بخش رندر متوقف شد.")
+        logger.info("بات متوقف شد")
 
 if __name__ == "__main__":
-    system = RenderSignalSystem()
+    bot = HybridTradingSystem()
     try:
-        system.run_loop()
+        bot.start()
     except KeyboardInterrupt:
-        system.stop()
+        bot.stop()
