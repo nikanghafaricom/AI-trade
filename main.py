@@ -1,5 +1,5 @@
 # ==============================================
-# Hybrid Signal Bot - نسخه جامع (V5 Ultimate Pro + Groq AI Tuner)
+# Hybrid Signal Bot - نسخه جامع نهایی (V5 Ultimate Pro + Full Groq AI)
 # ==============================================
 import os
 import time
@@ -129,7 +129,7 @@ class AnalysisLayer:
 
         high_low = df['high'] - df['low']
         high_close = (df['high'] - df['close'].shift()).abs()
-        low_close = (df['low'] - df['close'].shift()).abs()
+        low_close = (df['low'] - df['low'].shift()).abs()
         tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
         df['atr'] = tr.rolling(window=14).mean()
 
@@ -147,7 +147,7 @@ class AnalysisLayer:
             return "BEARISH"
         return "NEUTRAL"
 
-# ==================== ماژول هوش مصنوعی گروک (تنظیم‌کننده خودکار) ====================
+# ==================== ماژول هوش مصنوعی گروک (تنظیم‌کننده جامع) ====================
 class AIParameterOptimizer:
     def __init__(self, config):
         self.config = config
@@ -157,7 +157,7 @@ class AIParameterOptimizer:
         self.groq_api_key = os.getenv("GROQ_API_KEY", "")
         self.groq_endpoint = "https://api.groq.com/openai/v1/chat/completions"
         
-        # پارامترهای پویا که هر ۱۰ ساعت توسط گروک بهینه‌سازی می‌شوند
+        # تمامی متغیرهای حیاتی استراتژی، فیلترها و ریسک به ریوارد که توسط گروک کنترل می‌شوند
         self.dynamic_params = {
             "rsi_buy_min": 42,
             "rsi_buy_max_range_start": 48,
@@ -167,7 +167,12 @@ class AIParameterOptimizer:
             "rsi_sell_min_range_end": 52,
             "volume_mult": 0.50,
             "atr_min_filter": 0.0015,
-            "cooldown_minutes": 90
+            "cooldown_minutes": 90,
+            "sl_atr_mult": 1.3,      # ضریب فاصله حد ضرر بر اساس ATR
+            "tp1_mult": 1.5,         # ضریب حد سود اول
+            "tp2_mult": 2.5,         # ضریب حد سود دوم
+            "tp3_mult": 4.2,         # ضریب حد سود نهایی
+            "trailing_mult": 1.0     # ضریب فعال‌سازی تریلینگ استاپ
         }
 
     def should_optimize(self) -> bool:
@@ -198,7 +203,7 @@ class AIParameterOptimizer:
             logger.warning("کلید GROQ_API_KEY تنظیم نشده است. از پارامترهای فعلی استفاده می‌شود.")
             return
 
-        logger.info("در حال ارسال داده‌های بازار به هوش مصنوعی Groq برای تنظیم پارامترها...")
+        logger.info("در حال ارسال داده‌های بازار به هوش مصنوعی Groq برای تنظیم جامع پارامترها...")
         market_data = self.gather_market_summary(data_layer, analysis_layer)
 
         prompt = f"""
@@ -206,10 +211,10 @@ You are an expert quantitative trading system manager.
 Analyze the current market metrics for multiple cryptocurrency symbols:
 {json.dumps(market_data, indent=2)}
 
-Current parameters being used:
+Current parameters being used (including RSI rules, volume filters, and risk-reward / stop-loss multipliers):
 {json.dumps(self.dynamic_params, indent=2)}
 
-Based on the current market conditions (volatility, trend behavior, volume states), optimize these parameters to maximize winning probability and avoid whipsaws or fakeouts. You can adjust any or all of these factors.
+Based on current market volatility and trend behavior, optimize ALL of these parameters to maximize winning probability, prevent fakeouts, and adjust stop-losses or profit targets properly.
 CRITICAL: Return ONLY a valid JSON object containing the updated parameters with the exact same keys. Do not include markdown formatting like ```json or any extra text.
 """
 
@@ -240,7 +245,7 @@ CRITICAL: Return ONLY a valid JSON object containing the updated parameters with
                         self.dynamic_params[key] = type(self.dynamic_params[key])(new_params[key])
 
                 self.last_optimized_time = datetime.now()
-                logger.info(f"پارامترهای ربات با موفقیت توسط گروک بروزرسانی شدند: {self.dynamic_params}")
+                logger.info(f"تمام پارامترهای ربات (شامل استراتژی و ریسک) با موفقیت توسط گروک بروزرسانی شدند: {self.dynamic_params}")
             else:
                 logger.error(f"خطای API گروک: {response.status_code} - {response.text}")
         except Exception as e:
@@ -256,7 +261,6 @@ class SignalEngine:
         latest = df_15m.iloc[-1]
         prev = df_15m.iloc[-2]
         
-        # دریافت پارامترهای پویا از هوش مصنوعی گروک
         p = self.ai_optimizer.dynamic_params
 
         if pd.isna(latest['rsi']) or pd.isna(latest['ema_fast']) or pd.isna(latest['atr']):
@@ -367,8 +371,9 @@ class PaperTrader:
 
 # ==================== ارسال تلگرام ====================
 class TelegramSender:
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, ai_optimizer: AIParameterOptimizer):
         self.config = config
+        self.ai_optimizer = ai_optimizer
         self.base_url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}"
 
     def send_system_status(self, text: str):
@@ -406,25 +411,28 @@ class TelegramSender:
         price = float(latest['close'])
         atr = float(latest['atr']) if not pd.isna(latest['atr']) else price * 0.01
 
+        # دریافت ضرایب پویای حد سود و حد ضرر از هوش مصنوعی گروک
+        p = self.ai_optimizer.dynamic_params
+
         if side == "BUY":
-            stop_loss = min(float(latest['support']), price - (1.3 * atr))
+            stop_loss = min(float(latest['support']), price - (p["sl_atr_mult"] * atr))
             risk = price - stop_loss
-            tp1 = round(price + (1.5 * risk), 4)
-            tp2 = round(price + (2.5 * risk), 4)
-            tp3 = round(price + (4.2 * risk), 4)
+            tp1 = round(price + (p["tp1_mult"] * risk), 4)
+            tp2 = round(price + (p["tp2_mult"] * risk), 4)
+            tp3 = round(price + (p["tp3_mult"] * risk), 4)
             stop_loss = round(stop_loss, 4)
-            trailing_step = round(price + (1.0 * risk), 4)
+            trailing_step = round(price + (p["trailing_mult"] * risk), 4)
         else:
-            stop_loss = max(float(latest['resistance']), price + (1.3 * atr))
+            stop_loss = max(float(latest['resistance']), price + (p["sl_atr_mult"] * atr))
             risk = stop_loss - price
-            tp1 = round(price - (1.5 * risk), 4)
-            tp2 = round(price - (2.5 * risk), 4)
-            tp3 = round(price - (4.2 * risk), 4)
+            tp1 = round(price - (p["tp1_mult"] * risk), 4)
+            tp2 = round(price - (p["tp2_mult"] * risk), 4)
+            tp3 = round(price - (p["tp3_mult"] * risk), 4)
             stop_loss = round(stop_loss, 4)
-            trailing_step = round(price - (1.0 * risk), 4)
+            trailing_step = round(price - (p["trailing_mult"] * risk), 4)
 
         message = f"""
-{emoji} **ULTRA SIGNAL (Groq Optimized): {side} / {direction}**
+{emoji} **ULTRA SIGNAL (Groq Adaptive): {side} / {direction}**
 
 📍 **Symbol:** {symbol}
 ⏱ **Timeframe:** {timeframe} (Trend 4H: {trend_4h})
@@ -439,7 +447,7 @@ class TelegramSender:
 🛑 **Stop-Loss:** {stop_loss:,}
 ⚙️ **Trailing Stop Trigger:** Move SL to Entry at {trailing_step:,}
 
-📊 **Metrics:** RSI: {latest['rsi']:.1f} | Groq Adaptive AI
+📊 **Metrics:** RSI: {latest['rsi']:.1f} | AI Risk Control
 ⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}
 """
         try:
@@ -452,7 +460,7 @@ class TelegramSender:
                 },
                 timeout=10
             )
-            logger.info(f"سیگنال هوشمند {side} برای {symbol} ارسال شد")
+            logger.info(f"سیگنال هوشمند کامل {side} برای {symbol} ارسال شد")
             
             return {
                 "price": price,
@@ -474,7 +482,7 @@ class HybridTradingSystem:
         self.analysis = AnalysisLayer(self.config)
         self.ai_optimizer = AIParameterOptimizer(self.config)
         self.signal_engine = SignalEngine(self.config, self.ai_optimizer)
-        self.telegram = TelegramSender(self.config)
+        self.telegram = TelegramSender(self.config, self.ai_optimizer)
         self.paper_trader = PaperTrader(self.config, self.telegram)
         self.running = True
         self.last_signal_time: Dict[str, datetime] = {}
@@ -496,7 +504,7 @@ class HybridTradingSystem:
             now = datetime.now()
             cooldown = self.ai_optimizer.dynamic_params.get("cooldown_minutes", 90)
             if symbol in self.last_signal_time:
-                if now - self.last_signal_time[symbol] < timedelta(minutes=cooldown):
+                if now - self.last_symbol_time[symbol] < timedelta(minutes=cooldown):
                     return
 
             latest = df_15m.iloc[-1]
@@ -520,9 +528,8 @@ class HybridTradingSystem:
             logger.error(f"خطا در پردازش {symbol}: {e}")
 
     def run_once(self):
-        # بررسی و به‌روزرسانی پارامترها توسط گروک هر ۱۰ ساعت
         if self.ai_optimizer.should_optimize():
-            self.telegram.send_system_status("🔄 **در حال ارتباط با هوش مصنوعی Groq برای کالیبراسیون مجدد پارامترهای ربات...**")
+            self.telegram.send_system_status("🔄 **ارتباط با Groq برای بهینه‌سازی کامل قوانین استراتژی و ضرایب ریسک...**")
             self.ai_optimizer.optimize_parameters(self.data, self.analysis)
 
         logger.info("----- شروع آنالیز پیشرفته بازار -----")
@@ -533,8 +540,8 @@ class HybridTradingSystem:
         self.paper_trader.update_and_check_trades(self.data)
 
     def start(self):
-        logger.info("بات V5 Ultimate Pro با پشتیبانی Groq فعال شد")
-        start_message = "⚡️ **نسخه جامع V5 Ultimate Pro + Groq AI فعال شد.**\n\nربات آماده است و هر ۱۰ ساعت پارامترهای خود را با هوش مصنوعی تنظیم می‌کند."
+        logger.info("بات کامل V5 با کنترل هوش مصنوعی روی تمامی پارامترها فعال شد")
+        start_message = "⚡️ **نسخه نهایی V5 Ultimate Pro + Full Groq AI فعال شد.**\n\nهوش مصنوعی اکنون هم روی قوانین سیگنال‌دهی و هم روی مدیریت ریسک (TP/SL) کنترل کامل دارد."
         self.telegram.send_system_status(start_message)
 
         while self.running:
