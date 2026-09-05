@@ -243,7 +243,7 @@ CRITICAL: Return ONLY a valid JSON object containing the updated parameters with
 """
 
         payload = {
-            "model": "llama-3.1-8b-instant",  # <--- مدل اصلاح شده و پایدار
+            "model": "llama-3.3-70b-versatile",  # <--- مدل اصلاح شده و معتبر
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.2
         }
