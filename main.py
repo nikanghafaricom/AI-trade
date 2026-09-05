@@ -1,5 +1,5 @@
 # ==============================================
-# Hybrid Signal Bot - نسخه جامع نهایی (V5 Ultimate Pro + Full Groq AI)
+# Hybrid Signal Bot - نسخه جامع نهایی (V5 + Groq + Safe Clamping)
 # ==============================================
 import os
 import time
@@ -129,7 +129,7 @@ class AnalysisLayer:
 
         high_low = df['high'] - df['low']
         high_close = (df['high'] - df['close'].shift()).abs()
-        low_close = (df['low'] - df['low'].shift()).abs()
+        low_close = (df['low'] - df['close'].shift()).abs()
         tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
         df['atr'] = tr.rolling(window=14).mean()
 
@@ -147,7 +147,7 @@ class AnalysisLayer:
             return "BEARISH"
         return "NEUTRAL"
 
-# ==================== ماژول هوش مصنوعی گروک (تنظیم‌کننده جامع) ====================
+# ==================== ماژول هوش مصنوعی گروک (با محدوده‌بندی سخت‌گیرانه کدی) ====================
 class AIParameterOptimizer:
     def __init__(self, config):
         self.config = config
@@ -157,7 +157,7 @@ class AIParameterOptimizer:
         self.groq_api_key = os.getenv("GROQ_API_KEY", "")
         self.groq_endpoint = "https://api.groq.com/openai/v1/chat/completions"
         
-        # تمامی متغیرهای حیاتی استراتژی، فیلترها و ریسک به ریوارد که توسط گروک کنترل می‌شوند
+        # پارامترهای پیش‌فرض پایه
         self.dynamic_params = {
             "rsi_buy_min": 42,
             "rsi_buy_max_range_start": 48,
@@ -168,12 +168,36 @@ class AIParameterOptimizer:
             "volume_mult": 0.50,
             "atr_min_filter": 0.0015,
             "cooldown_minutes": 90,
-            "sl_atr_mult": 1.3,      # ضریب فاصله حد ضرر بر اساس ATR
-            "tp1_mult": 1.5,         # ضریب حد سود اول
-            "tp2_mult": 2.5,         # ضریب حد سود دوم
-            "tp3_mult": 4.2,         # ضریب حد سود نهایی
-            "trailing_mult": 1.0     # ضریب فعال‌سازی تریلینگ استاپ
+            "sl_atr_mult": 1.3,
+            "tp1_mult": 1.5,
+            "tp2_mult": 2.5,
+            "tp3_mult": 4.2,
+            "trailing_mult": 1.0
         }
+
+    def validate_and_clamp_params(self, new_params: dict) -> dict:
+        """محدود کردن بازه‌ای پارامترها در داخل خود کد برای جلوگیری از خطای ربات"""
+        clamped = {}
+        
+        clamped["rsi_buy_min"] = max(30, min(float(new_params.get("rsi_buy_min", 42)), 50))
+        clamped["rsi_buy_max_range_start"] = max(40, min(float(new_params.get("rsi_buy_max_range_start", 48)), 55))
+        clamped["rsi_buy_max_range_end"] = max(55, min(float(new_params.get("rsi_buy_max_range_end", 65)), 75))
+        
+        clamped["rsi_sell_max"] = max(50, min(float(new_params.get("rsi_sell_max", 58)), 70))
+        clamped["rsi_sell_min_range_start"] = max(25, min(float(new_params.get("rsi_sell_min_range_start", 35)), 45))
+        clamped["rsi_sell_min_range_end"] = max(40, min(float(new_params.get("rsi_sell_min_range_end", 52)), 60))
+        
+        clamped["volume_mult"] = max(0.2, min(float(new_params.get("volume_mult", 0.50)), 1.5))
+        clamped["atr_min_filter"] = max(0.0005, min(float(new_params.get("atr_min_filter", 0.0015)), 0.005))
+        clamped["cooldown_minutes"] = max(30, min(int(new_params.get("cooldown_minutes", 90)), 360))
+        
+        clamped["sl_atr_mult"] = max(0.8, min(float(new_params.get("sl_atr_mult", 1.3)), 2.5))
+        clamped["tp1_mult"] = max(1.0, min(float(new_params.get("tp1_mult", 1.5)), 3.0))
+        clamped["tp2_mult"] = max(2.0, min(float(new_params.get("tp2_mult", 2.5)), 5.0))
+        clamped["tp3_mult"] = max(3.5, min(float(new_params.get("tp3_mult", 4.2)), 8.0))
+        clamped["trailing_mult"] = max(0.5, min(float(new_params.get("trailing_mult", 1.0)), 2.0))
+        
+        return clamped
 
     def should_optimize(self) -> bool:
         if self.last_optimized_time is None:
@@ -203,7 +227,7 @@ class AIParameterOptimizer:
             logger.warning("کلید GROQ_API_KEY تنظیم نشده است. از پارامترهای فعلی استفاده می‌شود.")
             return
 
-        logger.info("در حال ارسال داده‌های بازار به هوش مصنوعی Groq برای تنظیم جامع پارامترها...")
+        logger.info("در حال ارسال داده‌های بازار به هوش مصنوعی Groq...")
         market_data = self.gather_market_summary(data_layer, analysis_layer)
 
         prompt = f"""
@@ -211,10 +235,10 @@ You are an expert quantitative trading system manager.
 Analyze the current market metrics for multiple cryptocurrency symbols:
 {json.dumps(market_data, indent=2)}
 
-Current parameters being used (including RSI rules, volume filters, and risk-reward / stop-loss multipliers):
+Current parameters being used:
 {json.dumps(self.dynamic_params, indent=2)}
 
-Based on current market volatility and trend behavior, optimize ALL of these parameters to maximize winning probability, prevent fakeouts, and adjust stop-losses or profit targets properly.
+Optimize these parameters based on market conditions. 
 CRITICAL: Return ONLY a valid JSON object containing the updated parameters with the exact same keys. Do not include markdown formatting like ```json or any extra text.
 """
 
@@ -238,14 +262,12 @@ CRITICAL: Return ONLY a valid JSON object containing the updated parameters with
                 if content.startswith("```"):
                     content = content.strip("`").replace("json\n", "").strip()
 
-                new_params = json.loads(content)
+                raw_params = json.loads(content)
                 
-                for key in self.dynamic_params:
-                    if key in new_params:
-                        self.dynamic_params[key] = type(self.dynamic_params[key])(new_params[key])
-
+                # عبور از صافیِ بازه‌های امن کدی
+                self.dynamic_params = self.validate_and_clamp_params(raw_params)
                 self.last_optimized_time = datetime.now()
-                logger.info(f"تمام پارامترهای ربات (شامل استراتژی و ریسک) با موفقیت توسط گروک بروزرسانی شدند: {self.dynamic_params}")
+                logger.info(f"پارامترها پس از بررسی محدوده امن کدی بروزرسانی شدند: {self.dynamic_params}")
             else:
                 logger.error(f"خطای API گروک: {response.status_code} - {response.text}")
         except Exception as e:
@@ -411,7 +433,6 @@ class TelegramSender:
         price = float(latest['close'])
         atr = float(latest['atr']) if not pd.isna(latest['atr']) else price * 0.01
 
-        # دریافت ضرایب پویای حد سود و حد ضرر از هوش مصنوعی گروک
         p = self.ai_optimizer.dynamic_params
 
         if side == "BUY":
@@ -432,7 +453,7 @@ class TelegramSender:
             trailing_step = round(price - (p["trailing_mult"] * risk), 4)
 
         message = f"""
-{emoji} **ULTRA SIGNAL (Groq Adaptive): {side} / {direction}**
+{emoji} **ULTRA SIGNAL (Safe-Clamped AI): {side} / {direction}**
 
 📍 **Symbol:** {symbol}
 ⏱ **Timeframe:** {timeframe} (Trend 4H: {trend_4h})
@@ -447,7 +468,7 @@ class TelegramSender:
 🛑 **Stop-Loss:** {stop_loss:,}
 ⚙️ **Trailing Stop Trigger:** Move SL to Entry at {trailing_step:,}
 
-📊 **Metrics:** RSI: {latest['rsi']:.1f} | AI Risk Control
+📊 **Metrics:** RSI: {latest['rsi']:.1f} | Guardrails Active
 ⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}
 """
         try:
@@ -460,7 +481,7 @@ class TelegramSender:
                 },
                 timeout=10
             )
-            logger.info(f"سیگنال هوشمند کامل {side} برای {symbol} ارسال شد")
+            logger.info(f"سیگنال امن {side} برای {symbol} ارسال شد")
             
             return {
                 "price": price,
@@ -504,7 +525,7 @@ class HybridTradingSystem:
             now = datetime.now()
             cooldown = self.ai_optimizer.dynamic_params.get("cooldown_minutes", 90)
             if symbol in self.last_signal_time:
-                if now - self.last_symbol_time[symbol] < timedelta(minutes=cooldown):
+                if now - self.last_signal_time[symbol] < timedelta(minutes=cooldown):
                     return
 
             latest = df_15m.iloc[-1]
@@ -529,7 +550,7 @@ class HybridTradingSystem:
 
     def run_once(self):
         if self.ai_optimizer.should_optimize():
-            self.telegram.send_system_status("🔄 **ارتباط با Groq برای بهینه‌سازی کامل قوانین استراتژی و ضرایب ریسک...**")
+            self.telegram.send_system_status("🔄 **ارتباط با Groq برای بهینه‌سازی پارامترها (با اعمال مرزهای امن کدی)...**")
             self.ai_optimizer.optimize_parameters(self.data, self.analysis)
 
         logger.info("----- شروع آنالیز پیشرفته بازار -----")
@@ -540,8 +561,8 @@ class HybridTradingSystem:
         self.paper_trader.update_and_check_trades(self.data)
 
     def start(self):
-        logger.info("بات کامل V5 با کنترل هوش مصنوعی روی تمامی پارامترها فعال شد")
-        start_message = "⚡️ **نسخه نهایی V5 Ultimate Pro + Full Groq AI فعال شد.**\n\nهوش مصنوعی اکنون هم روی قوانین سیگنال‌دهی و هم روی مدیریت ریسک (TP/SL) کنترل کامل دارد."
+        logger.info("بات V5 Ultimate Pro با بازه‌های امن کدی فعال شد")
+        start_message = "⚡️ **نسخه نهایی با محافظت کدی فعال شد.**\n\nهوش مصنوعی پارامترها را تنظیم می‌کند، اما بازه‌ها در خود کد قفل هستند تا ربات نه کور شود و نه متوقف."
         self.telegram.send_system_status(start_message)
 
         while self.running:
