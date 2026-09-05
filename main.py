@@ -176,27 +176,21 @@ class AIParameterOptimizer:
         }
 
     def validate_and_clamp_params(self, new_params: dict) -> dict:
-        """محدود کردن بازه‌ای پارامترها در داخل خود کد برای جلوگیری از خطای ربات"""
         clamped = {}
-        
         clamped["rsi_buy_min"] = max(30, min(float(new_params.get("rsi_buy_min", 42)), 50))
         clamped["rsi_buy_max_range_start"] = max(40, min(float(new_params.get("rsi_buy_max_range_start", 48)), 55))
         clamped["rsi_buy_max_range_end"] = max(55, min(float(new_params.get("rsi_buy_max_range_end", 65)), 75))
-        
         clamped["rsi_sell_max"] = max(50, min(float(new_params.get("rsi_sell_max", 58)), 70))
         clamped["rsi_sell_min_range_start"] = max(25, min(float(new_params.get("rsi_sell_min_range_start", 35)), 45))
         clamped["rsi_sell_min_range_end"] = max(40, min(float(new_params.get("rsi_sell_min_range_end", 52)), 60))
-        
         clamped["volume_mult"] = max(0.2, min(float(new_params.get("volume_mult", 0.50)), 1.5))
         clamped["atr_min_filter"] = max(0.0005, min(float(new_params.get("atr_min_filter", 0.0015)), 0.005))
         clamped["cooldown_minutes"] = max(30, min(int(new_params.get("cooldown_minutes", 90)), 360))
-        
         clamped["sl_atr_mult"] = max(0.8, min(float(new_params.get("sl_atr_mult", 1.3)), 2.5))
         clamped["tp1_mult"] = max(1.0, min(float(new_params.get("tp1_mult", 1.5)), 3.0))
         clamped["tp2_mult"] = max(2.0, min(float(new_params.get("tp2_mult", 2.5)), 5.0))
         clamped["tp3_mult"] = max(3.5, min(float(new_params.get("tp3_mult", 4.2)), 8.0))
         clamped["trailing_mult"] = max(0.5, min(float(new_params.get("trailing_mult", 1.0)), 2.0))
-        
         return clamped
 
     def should_optimize(self) -> bool:
@@ -243,7 +237,7 @@ CRITICAL: Return ONLY a valid JSON object containing the updated parameters with
 """
 
         payload = {
-            "model": "llama-3.1-8b-instant",
+            "model": "llama-3.3-70b-versatile",  # <--- مدل اصلاح شده و معتبر گروک
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.2
         }
@@ -263,8 +257,6 @@ CRITICAL: Return ONLY a valid JSON object containing the updated parameters with
                     content = content.strip("`").replace("json\n", "").strip()
 
                 raw_params = json.loads(content)
-                
-                # عبور از صافیِ بازه‌های امن کدی
                 self.dynamic_params = self.validate_and_clamp_params(raw_params)
                 self.last_optimized_time = datetime.now()
                 logger.info(f"پارامترها پس از بررسی محدوده امن کدی بروزرسانی شدند: {self.dynamic_params}")
