@@ -1,5 +1,5 @@
 # ==============================================
-# Hybrid Signal Bot - نسخه جامع نهایی (V5 + Groq + Safe Clamping)
+# Hybrid Signal Bot - نسخه جامع نهایی (V5 + Groq Official SDK/API)
 # ==============================================
 import os
 import time
@@ -147,7 +147,7 @@ class AnalysisLayer:
             return "BEARISH"
         return "NEUTRAL"
 
-# ==================== ماژول هوش مصنوعی گروک (با محدوده‌بندی سخت‌گیرانه کدی) ====================
+# ==================== ماژول هوش مصنوعی گروک (منطبق بر مستندات جدید تصویر) ====================
 class AIParameterOptimizer:
     def __init__(self, config):
         self.config = config
@@ -155,7 +155,7 @@ class AIParameterOptimizer:
         self.optimization_interval = timedelta(hours=10)
         
         self.groq_api_key = os.getenv("GROQ_API_KEY", "")
-        self.groq_endpoint = "https://api.groq.com/openai/v1/chat/completions"
+        self.groq_endpoint = "https://api.groq.com/openai/"
         
         # پارامترهای پیش‌فرض پایه
         self.dynamic_params = {
@@ -227,7 +227,7 @@ class AIParameterOptimizer:
             logger.warning("کلید GROQ_API_KEY تنظیم نشده است. از پارامترهای فعلی استفاده می‌شود.")
             return
 
-        logger.info("در حال ارسال داده‌های بازار به هوش مصنوعی Groq...")
+        logger.info("در حال ارسال داده‌های بازار به هوش مصنوعی Groq (با ساختار جدید)...")
         market_data = self.gather_market_summary(data_layer, analysis_layer)
 
         prompt = f"""
@@ -242,19 +242,20 @@ Optimize these parameters based on market conditions.
 CRITICAL: Return ONLY a valid JSON object containing the updated parameters with the exact same keys. Do not include markdown formatting like ```json or any extra text.
 """
 
-        payload = {
-            "model": "llama-3.3-70b-versatile",  # <--- مدل اصلاح شده و معتبر
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.2
-        }
-
         headers = {
             "Authorization": f"Bearer {self.groq_api_key}",
             "Content-Type": "application/json"
         }
 
+        payload = {
+            "model": "openai/gpt-oss-20b",
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.2
+        }
+
         try:
-            response = requests.post(self.groq_endpoint, json=payload, headers=headers, timeout=30)
+            # استفاده از اندپوینت صحیح منطبق بر مستندات جدید تصویر شما
+            response = requests.post(f"{self.groq_endpoint}v1/chat/completions", json=payload, headers=headers, timeout=30)
             if response.status_code == 200:
                 res_data = response.json()
                 content = res_data['choices'][0]['message']['content'].strip()
@@ -550,7 +551,7 @@ class HybridTradingSystem:
 
     def run_once(self):
         if self.ai_optimizer.should_optimize():
-            self.telegram.send_system_status("🔄 **ارتباط با Groq برای بهینه‌سازی پارامترها (با اعمال مرزهای امن کدی)...**")
+            self.telegram.send_system_status("🔄 **ارتباط با Groq برای بهینه‌سازی پارامترها (منطبق بر ساختار جدید)...**")
             self.ai_optimizer.optimize_parameters(self.data, self.analysis)
 
         logger.info("----- شروع آنالیز پیشرفته بازار -----")
@@ -561,8 +562,8 @@ class HybridTradingSystem:
         self.paper_trader.update_and_check_trades(self.data)
 
     def start(self):
-        logger.info("بات V5 Ultimate Pro با بازه‌های امن کدی فعال شد")
-        start_message = "⚡️ **نسخه نهایی با محافظت کدی فعال شد.**\n\nهوش مصنوعی پارامترها را تنظیم می‌کند، اما بازه‌ها در خود کد قفل هستند تا ربات نه کور شود و نه متوقف."
+        logger.info("بات V5 Ultimate Pro با ساختار جدید API فعال شد")
+        start_message = "⚡️ **نسخه نهایی با پلتفرم جدید گروک فعال شد.**\n\nارتباط با هوش مصنوعی کاملاً منطبق بر مستندات جدید تنظیم شد."
         self.telegram.send_system_status(start_message)
 
         while self.running:
