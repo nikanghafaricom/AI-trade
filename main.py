@@ -260,6 +260,19 @@ class AIParameterOptimizer:
 
         self.blacklist: Dict[str, datetime] = {}
 
+        # سقف‌های محافظه‌کارانه برای retry روی خطای ۴۲۹ (rate limit)
+        self.MAX_RETRIES_429 = 2
+        self.MAX_BACKOFF_SECONDS = 8
+
+        # محدودکننده‌ی نرخ دقیق: پلن رایگان Groq حدود ۳۰ درخواست در دقیقه می‌ده.
+        # هدف رو روی ۲۵ درخواست در دقیقه می‌ذاریم (کمی زیر سقف، برای حاشیه‌ی امن)
+        # و بین *هر دو* فراخوانی Groq (چه بهینه‌سازی پارامتر، چه لایه‌ی قضاوت) این
+        # فاصله رو رعایت می‌کنیم. این کار مستقل از تعداد سیگنال‌ها یا تایمینگ حلقه‌ی
+        # اصلی، تضمین می‌کنه که هیچ‌وقت به ۴۲۹ برنمی‌خوریم - نه اینکه صرفاً حدس بزنیم.
+        self.GROQ_TARGET_RPM = 25
+        self.groq_min_interval_seconds = 60.0 / self.GROQ_TARGET_RPM
+        self._last_groq_call_ts = 0.0
+
         self.symbol_states = {}
         for sym in config.SYMBOLS:
             self.symbol_states[sym] = {
@@ -327,6 +340,48 @@ class AIParameterOptimizer:
         clamped["trailing_mult"] = max(0.8, min(float(new_params.get("trailing_mult", 1.0)), 2.0))
         return clamped
 
+    def _wait_for_groq_slot(self):
+        """قبل از هر فراخوانی Groq صدا زده می‌شه؛ اگه از آخرین فراخوانی کمتر از حداقل
+        فاصله‌ی مجاز گذشته باشه، دقیقاً همون مقدار باقی‌مونده رو صبر می‌کنه."""
+        elapsed = time.time() - self._last_groq_call_ts
+        remaining = self.groq_min_interval_seconds - elapsed
+        if remaining > 0:
+            time.sleep(remaining)
+
+    def _post_with_retry(self, url: str, payload: dict, headers: dict, timeout: int, label: str) -> Optional[requests.Response]:
+        """
+        یه wrapper سبک روی requests.post که دو کار می‌کنه:
+        ۱. قبل از هر تلاش، فاصله‌ی زمانی امن نسبت به آخرین فراخوانی Groq رو رعایت می‌کنه
+           (self._wait_for_groq_slot) تا اصلاً به ۴۲۹ نخوریم.
+        ۲. اگه بازم ۴۲۹ گرفتیم (مثلاً به‌خاطر مصرف هم‌زمان از جای دیگه)، هدر Retry-After
+           رو می‌خونه و دقیقاً همون مقدار صبر و تلاش مجدد می‌کنه (حداکثر self.MAX_RETRIES_429 بار).
+        روی بقیه‌ی خطاها (404، 500، تایم‌اوت و ...) بدون تاخیر برمی‌گرده تا رفتار قبلی حفظ بشه.
+        """
+        for attempt in range(self.MAX_RETRIES_429 + 1):
+            self._wait_for_groq_slot()
+            try:
+                response = requests.post(url, json=payload, headers=headers, timeout=timeout)
+            finally:
+                self._last_groq_call_ts = time.time()
+
+            if response.status_code != 429:
+                return response
+
+            if attempt >= self.MAX_RETRIES_429:
+                return response
+
+            retry_after = response.headers.get("Retry-After") or response.headers.get("retry-after")
+            try:
+                wait_seconds = float(retry_after) if retry_after is not None else 2 * (attempt + 1)
+            except ValueError:
+                wait_seconds = 2 * (attempt + 1)
+            wait_seconds = min(wait_seconds, self.MAX_BACKOFF_SECONDS)
+
+            logger.warning(f"Groq API برای {label} پاسخ 429 داد؛ {wait_seconds:.1f} ثانیه صبر و تلاش مجدد ({attempt + 1}/{self.MAX_RETRIES_429})...")
+            time.sleep(wait_seconds)
+
+        return response
+
     def should_optimize(self, symbol: str) -> bool:
         state = self.symbol_states[symbol]
         if state["last_optimized_time"] is None:
@@ -375,7 +430,7 @@ No markdown formatting, no extra text.
         }
 
         try:
-            response = requests.post(f"{self.groq_endpoint}v1/chat/completions", json=payload, headers=headers, timeout=25)
+            response = self._post_with_retry(f"{self.groq_endpoint}v1/chat/completions", payload, headers, timeout=25, label=symbol)
             if response.status_code == 200:
                 res_data = response.json()
                 content = res_data['choices'][0]['message']['content'].strip()
@@ -426,7 +481,7 @@ Respond ONLY with valid JSON, no markdown, no extra text, in exactly this shape:
             "temperature": 0.3
         }
         try:
-            response = requests.post(f"{self.groq_endpoint}v1/chat/completions", json=payload, headers=headers, timeout=20)
+            response = self._post_with_retry(f"{self.groq_endpoint}v1/chat/completions", payload, headers, timeout=20, label=symbol)
             if response.status_code != 200:
                 logger.warning(f"لایه‌ی قضاوت AI برای {symbol} پاسخ {response.status_code} داد؛ به تصمیم کمی اکتفا می‌شه.")
                 return default
