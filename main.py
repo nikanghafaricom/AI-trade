@@ -214,8 +214,8 @@ class AnalysisLayer:
         if pd.isna(latest.get('ema_fast')) or pd.isna(latest.get('ema_slow')):
             return False
         if side == "BUY":
-            return latest['ema_fast'] > latest['ema_slow']
-        return latest['ema_fast'] < latest['ema_slow']
+            return bool(latest['ema_fast'] > latest['ema_slow'])
+        return bool(latest['ema_fast'] < latest['ema_slow'])
 
     def market_structure(self, df: pd.DataFrame, lookback: int = 40) -> str:
         """تشخیص ساختار بازار با فرکتال ۵کندلی: HH+HL = صعودی، LH+LL = نزولی"""
@@ -369,7 +369,7 @@ No markdown formatting, no extra text.
         }
 
         payload = {
-            "model": "llama-3.3-70b-versatile",
+            "model": "openai/gpt-oss-120b",
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.2
         }
@@ -421,7 +421,7 @@ Respond ONLY with valid JSON, no markdown, no extra text, in exactly this shape:
 """
         headers = {"Authorization": f"Bearer {self.groq_api_key}", "Content-Type": "application/json"}
         payload = {
-            "model": "llama-3.3-70b-versatile",
+            "model": "openai/gpt-oss-120b",
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.3
         }
