@@ -234,9 +234,9 @@ class AIParameterOptimizer:
         clamped["rsi_sell_min_range_start"] = max(25, min(float(new_params.get("rsi_sell_min_range_start", 35)), 45))
         clamped["rsi_sell_min_range_end"] = max(40, min(float(new_params.get("rsi_sell_min_range_end", 52)), 60))
         
-        clamped["volume_mult"] = max(1.0, min(float(new_params.get("volume_mult", 1.2)), 2.0))
-        clamped["atr_min_filter"] = max(0.001, min(float(new_params.get("atr_min_filter", 0.0015)), 0.005))
-        clamped["cooldown_minutes"] = max(60, min(int(new_params.get("cooldown_minutes", 120)), 360))
+        clamped["volume_mult"] = max(0.9, min(float(new_params.get("volume_mult", 1.2)), 1.8))
+        clamped["atr_min_filter"] = max(0.0008, min(float(new_params.get("atr_min_filter", 0.0015)), 0.004))
+        clamped["cooldown_minutes"] = max(45, min(int(new_params.get("cooldown_minutes", 120)), 240))
         
         clamped["sl_atr_mult"] = max(1.2, min(float(new_params.get("sl_atr_mult", 1.5)), 2.5))
         clamped["tp1_mult"] = max(1.2, min(float(new_params.get("tp1_mult", 1.5)), 3.0))
@@ -258,19 +258,27 @@ class AIParameterOptimizer:
         state = self.symbol_states[symbol]
         latest = df_15m.iloc[-1]
         
+        # ارسال داده‌های تأثیرگذار و کلیدی بازار به هوش مصنوعی برای تصمیم‌گیری دقیق‌تر
         market_metrics = {
             "symbol": symbol,
-            "close": float(latest['close']),
+            "close_price": float(latest['close']),
             "rsi": float(latest['rsi']) if not pd.isna(latest['rsi']) else 50,
+            "atr_volatility": float(latest['atr']) if not pd.isna(latest['atr']) else 0,
+            "current_volume": float(latest['volume']) if not pd.isna(latest['volume']) else 0,
+            "volume_sma": float(latest['vol_sma']) if not pd.isna(latest['vol_sma']) else 0,
+            "support": float(latest['support']) if not pd.isna(latest['support']) else 0,
+            "resistance": float(latest['resistance']) if not pd.isna(latest['resistance']) else 0,
             "consecutive_losses": state["consecutive_losses"]
         }
 
         prompt = f"""
-You are an ultra-conservative risk management AI for crypto spot trading. 
-Analyze asset {symbol} based on current metrics: {json.dumps(market_metrics)}
-We must PREVENT losses at all costs and make parameters extremely selective and secure.
-Return ONLY valid JSON with the exact same keys as these parameters:
-{json.dumps(state["params"])}
+You are an advanced quantitative trading AI. First, analyze the following key market data and indicators for asset {symbol}:
+{json.dumps(market_metrics, indent=2)}
+
+Based on these specific conditions, dynamically tune the trading parameters to adapt to the current market regime. 
+Keep risk management strict to prevent losses, but allow reasonable flexibility so the bot can capture valid opportunities within safe logical boundaries.
+Return ONLY valid JSON with the exact same keys as these default parameters:
+{json.dumps(state["params"], indent=2)}
 No markdown formatting, no extra text.
 """
 
@@ -282,7 +290,7 @@ No markdown formatting, no extra text.
         payload = {
             "model": "llama-3.3-70b-versatile",
             "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.1
+            "temperature": 0.2
         }
 
         try:
@@ -297,7 +305,7 @@ No markdown formatting, no extra text.
                 raw_params = json.loads(content)
                 state["params"] = self.validate_and_clamp_params(raw_params)
                 state["last_optimized_time"] = datetime.now()
-                logger.info(f"پارامترهای ضد ضرر اختصاصی {symbol} بروزرسانی شد.")
+                logger.info(f"پارامترهای ضد ضرر و پویای {symbol} بر اساس داده‌های روز بروزرسانی شد.")
         except Exception as e:
             logger.error(f"خطا در بهینه‌سازی هوش مصنوعی برای {symbol}: {e}")
 
@@ -621,7 +629,7 @@ class HybridTradingSystem:
 
     def start(self):
         logger.info("بات ضد ضرر با قابلیت تنظیم اختصاصی ارزها فعال شد")
-        start_message = "🛡 **نسخه جدید ضد ضرر و محافظت از سرمایه فعال شد.**\n\nربات اکنون بسیار گزینشی عمل می‌کند و ارزهای دارای خطای بالا را مسدود می‌کند."
+        start_message = "🛡 **نسخه جدید ضد ضرر و محافظت از سرمایه فعال شد.**\n\nربات اکنون داده‌های بازار را به هوش مصنوعی می‌دهد تا بر اساس شرایط روز، پارامترها را بهینه‌سازی کند."
         self.telegram.send_system_status(start_message)
 
         while self.running:
