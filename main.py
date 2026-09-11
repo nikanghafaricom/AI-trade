@@ -1,5 +1,5 @@
 # ==============================================
-# Hybrid Signal Bot - نسخه نهایی فوق‌پیشرفته (Peak Performance & Symbol-Specific AI)
+# Hybrid Signal Bot - نسخه ضد ضرر و فوق‌پیشرفته تطبیقی (Anti-Loss & Peak Performance)
 # ==============================================
 import os
 import time
@@ -23,7 +23,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/html; charset=utf-8")
         self.end_headers()
-        self.wfile.write(b"Bot is alive and running at Peak Performance!")
+        self.wfile.write(b"Anti-Loss Bot is alive and running at Peak Performance!")
 
     def do_HEAD(self):
         self.send_response(200)
@@ -103,7 +103,7 @@ class DataLayer:
             'options': {'defaultType': 'spot'}
         })
 
-    def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 100) -> pd.DataFrame:
+    def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 150) -> pd.DataFrame:
         try:
             ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -113,7 +113,7 @@ class DataLayer:
             logger.error(f"خطا در دریافت داده {symbol} در تایم‌فریم {timeframe}: {e}")
             return pd.DataFrame()
 
-# ==================== لایه تحلیل ====================
+# ==================== لایه تحلیل و تشخیص رژیم بازار ====================
 class AnalysisLayer:
     def __init__(self, config: Config):
         self.config = config
@@ -145,8 +145,24 @@ class AnalysisLayer:
 
         return df
 
+    def is_market_tradable(self, df_15m: pd.DataFrame) -> bool:
+        """تشخیص رژیم بازار - جلوگیری از ترید در بازارهای رنج و فیک"""
+        if df_15m.empty or len(df_15m) < 30:
+            return False
+        latest = df_15m.iloc[-1]
+        
+        if pd.isna(latest['volume']) or pd.isna(latest['vol_sma']) or latest['vol_sma'] == 0:
+            return False
+            
+        volume_ratio = latest['volume'] / latest['vol_sma']
+        # اگر حجم بازار خیلی مرده باشد (کمتر از 0.8 میانگین)، ترید ممنوع
+        if volume_ratio < 0.8:
+            return False
+            
+        return True
+
     def get_major_trend(self, df_4h: pd.DataFrame) -> str:
-        if df_4h.empty or len(df_4h) < 200:
+        if df_4h.empty or len(df_4h) < 100:
             return "NEUTRAL"
         latest = df_4h.iloc[-1]
         if latest['close'] > latest['ema_trend'] and latest['ema_fast'] > latest['ema_slow']:
@@ -155,18 +171,21 @@ class AnalysisLayer:
             return "BEARISH"
         return "NEUTRAL"
 
-# ==================== هوش مصنوعی پیشرفته اختصاصی برای هر ارز ====================
+# ==================== هوش مصنوعی پیشرفته اختصاصی و ضد ضرر ====================
 class AIParameterOptimizer:
     def __init__(self, config):
         self.config = config
         self.groq_api_key = os.getenv("GROQ_API_KEY", "")
         self.groq_endpoint = "https://api.groq.com/openai/"
         
-        # ذخیره پارامترهای مجزا و اختصاصی برای هر نماد (Symbol-Specific States)
+        # سیستم بلک‌لیست و تنبیه هوشمند برای ارزهای ضررده
+        self.blacklist: Dict[str, datetime] = {}
+        
         self.symbol_states = {}
         for sym in config.SYMBOLS:
             self.symbol_states[sym] = {
                 "last_optimized_time": None,
+                "consecutive_losses": 0,
                 "params": {
                     "rsi_buy_min": 42,
                     "rsi_buy_max_range_start": 48,
@@ -174,17 +193,36 @@ class AIParameterOptimizer:
                     "rsi_sell_max": 58,
                     "rsi_sell_min_range_start": 35,
                     "rsi_sell_min_range_end": 52,
-                    "volume_mult": 0.50,
+                    "volume_mult": 1.2,
                     "atr_min_filter": 0.0015,
-                    "cooldown_minutes": 90,
-                    "sl_atr_mult": 1.3,
+                    "cooldown_minutes": 120,
+                    "sl_atr_mult": 1.5,
                     "tp1_mult": 1.5,
                     "tp2_mult": 2.5,
-                    "tp3_mult": 4.2,
+                    "tp3_mult": 4.0,
                     "trailing_mult": 1.0
                 }
             }
-        self.optimization_interval = timedelta(hours=10)
+        self.optimization_interval = timedelta(hours=6)
+
+    def is_blacklisted(self, symbol: str) -> bool:
+        if symbol in self.blacklist:
+            if datetime.now() < self.blacklist[symbol]:
+                return True
+            else:
+                del self.blacklist[symbol]
+        return False
+
+    def register_loss(self, symbol: str):
+        state = self.symbol_states[symbol]
+        state["consecutive_losses"] += 1
+        penalty_hours = min(2 * state["consecutive_losses"], 12)
+        self.blacklist[symbol] = datetime.now() + timedelta(hours=penalty_hours)
+        logger.warning(f"سیستم ضد ضرر: ارز {symbol} به دلیل ضرر متوالی به مدت {penalty_hours} ساعت مسدود شد.")
+
+    def register_win(self, symbol: str):
+        state = self.symbol_states[symbol]
+        state["consecutive_losses"] = max(0, state["consecutive_losses"] - 1)
 
     def validate_and_clamp_params(self, new_params: dict) -> dict:
         clamped = {}
@@ -196,15 +234,15 @@ class AIParameterOptimizer:
         clamped["rsi_sell_min_range_start"] = max(25, min(float(new_params.get("rsi_sell_min_range_start", 35)), 45))
         clamped["rsi_sell_min_range_end"] = max(40, min(float(new_params.get("rsi_sell_min_range_end", 52)), 60))
         
-        clamped["volume_mult"] = max(0.2, min(float(new_params.get("volume_mult", 0.50)), 1.5))
-        clamped["atr_min_filter"] = max(0.0005, min(float(new_params.get("atr_min_filter", 0.0015)), 0.005))
-        clamped["cooldown_minutes"] = max(30, min(int(new_params.get("cooldown_minutes", 90)), 360))
+        clamped["volume_mult"] = max(1.0, min(float(new_params.get("volume_mult", 1.2)), 2.0))
+        clamped["atr_min_filter"] = max(0.001, min(float(new_params.get("atr_min_filter", 0.0015)), 0.005))
+        clamped["cooldown_minutes"] = max(60, min(int(new_params.get("cooldown_minutes", 120)), 360))
         
-        clamped["sl_atr_mult"] = max(0.8, min(float(new_params.get("sl_atr_mult", 1.3)), 2.5))
-        clamped["tp1_mult"] = max(1.0, min(float(new_params.get("tp1_mult", 1.5)), 3.0))
+        clamped["sl_atr_mult"] = max(1.2, min(float(new_params.get("sl_atr_mult", 1.5)), 2.5))
+        clamped["tp1_mult"] = max(1.2, min(float(new_params.get("tp1_mult", 1.5)), 3.0))
         clamped["tp2_mult"] = max(2.0, min(float(new_params.get("tp2_mult", 2.5)), 5.0))
-        clamped["tp3_mult"] = max(3.5, min(float(new_params.get("tp3_mult", 4.2)), 8.0))
-        clamped["trailing_mult"] = max(0.5, min(float(new_params.get("trailing_mult", 1.0)), 2.0))
+        clamped["tp3_mult"] = max(3.0, min(float(new_params.get("tp3_mult", 4.0)), 8.0))
+        clamped["trailing_mult"] = max(0.8, min(float(new_params.get("trailing_mult", 1.0)), 2.0))
         return clamped
 
     def should_optimize(self, symbol: str) -> bool:
@@ -221,22 +259,19 @@ class AIParameterOptimizer:
         latest = df_15m.iloc[-1]
         
         market_metrics = {
+            "symbol": symbol,
             "close": float(latest['close']),
             "rsi": float(latest['rsi']) if not pd.isna(latest['rsi']) else 50,
-            "atr": float(latest['atr']) if not pd.isna(latest['atr']) else 0,
-            "volume_ratio": float(latest['volume'] / latest['vol_sma']) if not pd.isna(latest['vol_sma']) and latest['vol_sma'] > 0 else 1.0
+            "consecutive_losses": state["consecutive_losses"]
         }
 
         prompt = f"""
-You are an expert quantitative trading strategist. 
-Analyze the specific asset {symbol} based on its current market metrics:
-{json.dumps(market_metrics, indent=2)}
-
-Current parameters for {symbol}:
-{json.dumps(state["params"], indent=2)}
-
-Optimize these parameters specifically for {symbol}'s volatility and behavior. 
-CRITICAL: Return ONLY a valid JSON object containing the updated parameters with the exact same keys. Do not include markdown formatting like ```json or any extra text.
+You are an ultra-conservative risk management AI for crypto spot trading. 
+Analyze asset {symbol} based on current metrics: {json.dumps(market_metrics)}
+We must PREVENT losses at all costs and make parameters extremely selective and secure.
+Return ONLY valid JSON with the exact same keys as these parameters:
+{json.dumps(state["params"])}
+No markdown formatting, no extra text.
 """
 
         headers = {
@@ -247,11 +282,11 @@ CRITICAL: Return ONLY a valid JSON object containing the updated parameters with
         payload = {
             "model": "llama-3.3-70b-versatile",
             "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.2
+            "temperature": 0.1
         }
 
         try:
-            response = requests.post(f"{self.groq_endpoint}v1/chat/completions", json=payload, headers=headers, timeout=30)
+            response = requests.post(f"{self.groq_endpoint}v1/chat/completions", json=payload, headers=headers, timeout=25)
             if response.status_code == 200:
                 res_data = response.json()
                 content = res_data['choices'][0]['message']['content'].strip()
@@ -262,28 +297,34 @@ CRITICAL: Return ONLY a valid JSON object containing the updated parameters with
                 raw_params = json.loads(content)
                 state["params"] = self.validate_and_clamp_params(raw_params)
                 state["last_optimized_time"] = datetime.now()
-                logger.info(f"پارامترهای اختصاصی {symbol} توسط هوش مصنوعی بروزرسانی شد.")
-            else:
-                logger.error(f"خطای API گروک برای {symbol}: {response.status_code} - {response.text}")
+                logger.info(f"پارامترهای ضد ضرر اختصاصی {symbol} بروزرسانی شد.")
         except Exception as e:
-            logger.error(f"خطا در پردازش پاسخ گروک برای {symbol}: {e}")
+            logger.error(f"خطا در بهینه‌سازی هوش مصنوعی برای {symbol}: {e}")
 
     def get_params(self, symbol: str) -> dict:
         return self.symbol_states[symbol]["params"]
 
-# ==================== موتور سیگنال ====================
+# ==================== موتور سیگنال ضد ضرر ====================
 class SignalEngine:
-    def __init__(self, config: Config, ai_optimizer: AIParameterOptimizer):
+    def __init__(self, config: Config, ai_optimizer: AIParameterOptimizer, analysis: AnalysisLayer):
         self.config = config
         self.ai_optimizer = ai_optimizer
+        self.analysis = analysis
 
     def get_rule_signal(self, symbol: str, df_15m: pd.DataFrame, trend_4h: str) -> Optional[str]:
-        if df_15m.empty or len(df_15m) < 20:
+        if df_15m.empty or len(df_15m) < 30:
+            return None
+            
+        # بررسی بلک‌لیست (اگر ارز به دلیل ضرر قفل باشد، هیچ سیگنالی صادر نمی‌شود)
+        if self.ai_optimizer.is_blacklisted(symbol):
+            return None
+
+        # بررسی رژیم بازار (جلوگیری از ترید در بازارهای رنج و پر از فیک)
+        if not self.analysis.is_market_tradable(df_15m):
             return None
             
         latest = df_15m.iloc[-1]
         prev = df_15m.iloc[-2]
-        
         p = self.ai_optimizer.get_params(symbol)
 
         if pd.isna(latest['rsi']) or pd.isna(latest['ema_fast']) or pd.isna(latest['atr']):
@@ -293,26 +334,29 @@ class SignalEngine:
             return None
 
         volume_confirmed = latest['volume'] > (latest['vol_sma'] * p["volume_mult"])
+        if not volume_confirmed:
+            return None
 
         if trend_4h in ["BULLISH", "NEUTRAL"]:
             ema_bull = latest['ema_fast'] > latest['ema_slow']
             rsi_buy = (latest['rsi'] > p["rsi_buy_min"] and prev['rsi'] <= p["rsi_buy_min"]) or (p["rsi_buy_max_range_start"] <= latest['rsi'] <= p["rsi_buy_max_range_end"] and latest['rsi'] > prev['rsi'])
-            if ema_bull and rsi_buy and volume_confirmed:
+            if ema_bull and rsi_buy:
                 return "BUY"
 
         if trend_4h in ["BEARISH", "NEUTRAL"]:
             ema_bear = latest['ema_fast'] < latest['ema_slow']
             rsi_sell = (latest['rsi'] < p["rsi_sell_max"] and prev['rsi'] >= p["rsi_sell_max"]) or (p["rsi_sell_min_range_start"] <= latest['rsi'] <= p["rsi_sell_min_range_end"] and latest['rsi'] < prev['rsi'])
-            if ema_bear and rsi_sell and volume_confirmed:
+            if ema_bear and rsi_sell:
                 return "SELL"
 
         return None
 
-# ==================== ماژول معامله مجازی (Paper Trader) ====================
+# ==================== ماژول معامله مجازی محافظت‌شده ====================
 class PaperTrader:
-    def __init__(self, config: Config, telegram_sender):
+    def __init__(self, config: Config, telegram_sender, ai_optimizer: AIParameterOptimizer):
         self.config = config
         self.telegram = telegram_sender
+        self.ai_optimizer = ai_optimizer
         self.file_path = "paper_trades.json"
         self.active_trades = self._load_trades()
 
@@ -360,15 +404,18 @@ class PaperTrader:
 
                 side = trade['side']
                 entry = trade['entry']
+                symbol = trade['symbol']
 
                 if side == "BUY":
                     if latest_low <= trade['sl']:
                         pnl = ((trade['sl'] - entry) / entry) * 100
+                        self.ai_optimizer.register_loss(symbol)
                         self._send_close_report(trade, pnl)
                         del self.active_trades[trade_id]
                         continue
                     elif latest_high >= trade['tp1']:
                         pnl = ((trade['tp1'] - entry) / entry) * 100
+                        self.ai_optimizer.register_win(symbol)
                         self._send_close_report(trade, pnl)
                         del self.active_trades[trade_id]
                         continue
@@ -376,11 +423,13 @@ class PaperTrader:
                 elif side == "SELL":
                     if latest_high >= trade['sl']:
                         pnl = ((entry - trade['sl']) / entry) * 100
+                        self.ai_optimizer.register_loss(symbol)
                         self._send_close_report(trade, pnl)
                         del self.active_trades[trade_id]
                         continue
                     elif latest_low <= trade['tp1']:
                         pnl = ((entry - trade['tp1']) / entry) * 100
+                        self.ai_optimizer.register_win(symbol)
                         self._send_close_report(trade, pnl)
                         del self.active_trades[trade_id]
                         continue
@@ -393,7 +442,7 @@ class PaperTrader:
     def _send_close_report(self, trade: Dict, pnl: float):
         emoji = "✅" if pnl > 0 else "❌"
         msg = f"""
-{emoji} **معامله بسته شد**
+{emoji} **گزارش معامله محافظت‌شده**
 
 📌 **ارز:** {trade['symbol']} ({trade['side']})
 📈 **سود/زیان:** {pnl:+.2f}%
@@ -405,7 +454,7 @@ class TelegramSender:
     def __init__(self, config: Config, ai_optimizer: AIParameterOptimizer):
         self.config = config
         self.ai_optimizer = ai_optimizer
-        self.base_url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}"
+        self.base_url = f"[https://api.telegram.org/bot](https://api.telegram.org/bot){config.TELEGRAM_BOT_TOKEN}"
 
     def send_system_status(self, text: str):
         try:
@@ -462,7 +511,7 @@ class TelegramSender:
             trailing_step = round(price - (p["trailing_mult"] * risk), 4)
 
         message = f"""
-{emoji} **ULTRA SIGNAL (Symbol-Specific AI): {side} / {direction}**
+{emoji} **ANTI-LOSS ULTRA SIGNAL: {side} / {direction}**
 
 📍 **Symbol:** {symbol}
 ⏱ **Timeframe:** {timeframe} (Trend 4H: {trend_4h})
@@ -477,7 +526,7 @@ class TelegramSender:
 🛑 **Stop-Loss:** {stop_loss:,}
 ⚙️ **Trailing Stop Trigger:** Move SL to Entry at {trailing_step:,}
 
-📊 **Metrics:** RSI: {latest['rsi']:.1f} | Guardrails Active
+📊 **Metrics:** RSI: {latest['rsi']:.1f} | Market Guardrails Active
 ⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}
 """
         try:
@@ -490,7 +539,7 @@ class TelegramSender:
                 },
                 timeout=10
             )
-            logger.info(f"سیگنال اختصاصی {side} برای {symbol} ارسال شد")
+            logger.info(f"سیگنال ضد ضرر {side} برای {symbol} ارسال شد")
             
             return {
                 "price": price,
@@ -511,9 +560,9 @@ class HybridTradingSystem:
         self.data = DataLayer(self.config)
         self.analysis = AnalysisLayer(self.config)
         self.ai_optimizer = AIParameterOptimizer(self.config)
-        self.signal_engine = SignalEngine(self.config, self.ai_optimizer)
+        self.signal_engine = SignalEngine(self.config, self.ai_optimizer, self.analysis)
         self.telegram = TelegramSender(self.config, self.ai_optimizer)
-        self.paper_trader = PaperTrader(self.config, self.telegram)
+        self.paper_trader = PaperTrader(self.config, self.telegram, self.ai_optimizer)
         self.running = True
         self.last_signal_time: Dict[str, datetime] = {}
 
@@ -524,9 +573,8 @@ class HybridTradingSystem:
             if df_15m.empty:
                 return
 
-            # بررسی و بهینه‌سازی اختصاصی هوش مصنوعی برای این نماد در صورت فرا رسیدن زمان آن
             if self.ai_optimizer.should_optimize(symbol):
-                logger.info(f"بروزرسانی پارامترهای اختصاصی هوش مصنوعی برای {symbol}...")
+                logger.info(f"بروزرسانی پارامترهای ضد ضرر هوش مصنوعی برای {symbol}...")
                 self.ai_optimizer.optimize_symbol_parameters(symbol, df_15m)
 
             df_4h = self.data.fetch_ohlcv(symbol, timeframe=self.config.TREND_TIMEFRAME)
@@ -539,7 +587,7 @@ class HybridTradingSystem:
 
             now = datetime.now()
             p = self.ai_optimizer.get_params(symbol)
-            cooldown = p.get("cooldown_minutes", 90)
+            cooldown = p.get("cooldown_minutes", 120)
             if symbol in self.last_signal_time:
                 if now - self.last_signal_time[symbol] < timedelta(minutes=cooldown):
                     return
@@ -564,7 +612,7 @@ class HybridTradingSystem:
             logger.error(f"خطا در پردازش {symbol}: {e}")
 
     def run_once(self):
-        logger.info("----- شروع آنالیز پیشرفته بازار (Symbol-Specific) -----")
+        logger.info("----- شروع آنالیز ایمن و ضد ضرر بازار -----")
         for symbol in self.config.SYMBOLS:
             self.process_symbol(symbol)
             time.sleep(1.5)
@@ -572,8 +620,8 @@ class HybridTradingSystem:
         self.paper_trader.update_and_check_trades(self.data)
 
     def start(self):
-        logger.info("بات نهایی Peak Performance با قابلیت تحلیل اختصاصی ارزها فعال شد")
-        start_message = "⚡️ **نسخه نهایی فوق‌پیشرفته (Symbol-Specific AI) فعال شد.**\n\nربات اکنون برای هر ارز پارامترهای منحصر به فرد تنظیم می‌کند."
+        logger.info("بات ضد ضرر با قابلیت تنظیم اختصاصی ارزها فعال شد")
+        start_message = "🛡 **نسخه جدید ضد ضرر و محافظت از سرمایه فعال شد.**\n\nربات اکنون بسیار گزینشی عمل می‌کند و ارزهای دارای خطای بالا را مسدود می‌کند."
         self.telegram.send_system_status(start_message)
 
         while self.running:
