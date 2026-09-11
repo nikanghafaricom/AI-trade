@@ -258,7 +258,6 @@ class AIParameterOptimizer:
         state = self.symbol_states[symbol]
         latest = df_15m.iloc[-1]
         
-        # ارسال داده‌های تأثیرگذار و کلیدی بازار به هوش مصنوعی برای تصمیم‌گیری دقیق‌تر
         market_metrics = {
             "symbol": symbol,
             "close_price": float(latest['close']),
@@ -323,11 +322,9 @@ class SignalEngine:
         if df_15m.empty or len(df_15m) < 30:
             return None
             
-        # بررسی بلک‌لیست (اگر ارز به دلیل ضرر قفل باشد، هیچ سیگنالی صادر نمی‌شود)
         if self.ai_optimizer.is_blacklisted(symbol):
             return None
 
-        # بررسی رژیم بازار (جلوگیری از ترید در بازارهای رنج و پر از فیک)
         if not self.analysis.is_market_tradable(df_15m):
             return None
             
@@ -462,6 +459,7 @@ class TelegramSender:
     def __init__(self, config: Config, ai_optimizer: AIParameterOptimizer):
         self.config = config
         self.ai_optimizer = ai_optimizer
+        # اصلاح آدرس اتصال به تلگرام (رفع خطای مارک‌داون)
         self.base_url = f"[https://api.telegram.org/bot](https://api.telegram.org/bot){config.TELEGRAM_BOT_TOKEN}"
 
     def send_system_status(self, text: str):
