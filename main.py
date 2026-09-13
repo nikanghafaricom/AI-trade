@@ -69,6 +69,15 @@ class Config:
         "ADA/USDT",
         "DOGE/USDT",
         "LINK/USDT",
+        # --- دو ارز اضافه‌شده ---
+        # PAXG (توکن پشتوانه‌ی طلا): تنها دارایی که واقعاً همبستگی پایین‌تری با کل بازار
+        # کریپتو داره و در ریزش‌های ریسک‌آف کلی بازار معمولاً بهتر از آلت‌کوین‌ها رفتار می‌کنه.
+        # نوسانش خیلی کمتره، برای همین پارامترهای مخصوص خودش پایین‌تر تنظیم شده (به بخش
+        # AIParameterOptimizer نگاه کن).
+        "PAXG/USDT",
+        # LTC: نقدشوندگی بالا و تاریخچه‌ی طولانی، به‌عنوان یک "میجر" مکمل BTC/ETH/BNB اضافه شد
+        # تا فرصت‌های بیشتری برای سیگنال long در گروه میجرها فراهم بشه.
+        "LTC/USDT",
     ]
 
     # گروه‌بندی همبستگی - برای جلوگیری از باز کردن چند معامله‌ی عملاً یکسان هم‌زمان
@@ -76,6 +85,7 @@ class Config:
         "BTC/USDT": "majors",
         "ETH/USDT": "majors",
         "BNB/USDT": "majors",
+        "LTC/USDT": "majors",
         "SOL/USDT": "L1_alt",
         "AVAX/USDT": "L1_alt",
         "NEAR/USDT": "L1_alt",
@@ -83,6 +93,9 @@ class Config:
         "XRP/USDT": "payments",
         "DOGE/USDT": "meme",
         "LINK/USDT": "oracle",
+        # گروه جداگانه چون رفتار PAXG (طلا) از بقیه‌ی گروه‌ها متفاوته و نباید با اون‌ها
+        # در یک سقف اکسپوژر مشترک محاسبه بشه
+        "PAXG/USDT": "defensive_gold",
     }
 
     ENTRY_TIMEFRAME = "15m"
@@ -273,27 +286,54 @@ class AIParameterOptimizer:
         self.groq_min_interval_seconds = 60.0 / self.GROQ_TARGET_RPM
         self._last_groq_call_ts = 0.0
 
+        # پارامترهای پیش‌فرض مشترک (نقطه‌ی شروع). موتور AI هر ۶ ساعت طبق همون منطق قبلی
+        # (optimize_symbol_parameters) این‌ها رو به‌روزرسانی می‌کنه - این بخش فقط نقطه‌ی
+        # شروعِ هر ارز رو مشخص می‌کنه، نه فرمول امتیازدهی یا آستانه‌ها را.
+        default_params = {
+            "rsi_buy_min": 42,
+            "rsi_buy_max_range_start": 48,
+            "rsi_buy_max_range_end": 65,
+            "rsi_sell_max": 58,
+            "rsi_sell_min_range_start": 35,
+            "rsi_sell_min_range_end": 52,
+            "volume_mult": 1.0,
+            "atr_min_filter": 0.0015,
+            "cooldown_minutes": 90,
+            "sl_atr_mult": 1.5,
+            "tp1_mult": 1.5,
+            "tp2_mult": 2.5,
+            "tp3_mult": 4.0,
+            "trailing_mult": 1.0
+        }
+
+        # تنظیم اولیه‌ی مختص هر ارز: فقط نقطه‌ی شروع رو بر اساس شخصیت/نوسان طبیعی هر دارایی
+        # جابه‌جا می‌کنه (مثلاً PAXG که طلاست خیلی کم‌نوسان‌تر از DOGE هست) - نه شرط ورود
+        # جدید و نه سخت‌گیری اضافه. همه‌ی مقادیر از فیلتر validate_and_clamp_params رد
+        # می‌شن، پس در همون محدوده‌ی امن قبلی باقی می‌مونن.
+        SYMBOL_PARAM_OVERRIDES = {
+            "BTC/USDT":  {"atr_min_filter": 0.0010, "sl_atr_mult": 1.3},
+            "ETH/USDT":  {"atr_min_filter": 0.0012, "sl_atr_mult": 1.4},
+            "BNB/USDT":  {"atr_min_filter": 0.0012, "sl_atr_mult": 1.4},
+            "LTC/USDT":  {"atr_min_filter": 0.0013, "sl_atr_mult": 1.4},
+            "SOL/USDT":  {"atr_min_filter": 0.0018, "sl_atr_mult": 1.7, "rsi_buy_max_range_end": 68},
+            "AVAX/USDT": {"atr_min_filter": 0.0018, "sl_atr_mult": 1.7},
+            "NEAR/USDT": {"atr_min_filter": 0.0018, "sl_atr_mult": 1.7},
+            "ADA/USDT":  {"atr_min_filter": 0.0015},
+            "XRP/USDT":  {"atr_min_filter": 0.0020, "cooldown_minutes": 110},
+            "DOGE/USDT": {"atr_min_filter": 0.0025, "sl_atr_mult": 1.9, "cooldown_minutes": 120},
+            "LINK/USDT": {"atr_min_filter": 0.0016, "sl_atr_mult": 1.6},
+            # PAXG خیلی کم‌نوسان‌تره؛ فیلتر حداقل ATR و ضریب SL پایین‌تر می‌ذاریم تا
+            # حرکات طبیعی (هرچند کوچیک) این دارایی هم بتونن سیگنال معتبر تولید کنن
+            "PAXG/USDT": {"atr_min_filter": 0.0008, "sl_atr_mult": 1.2, "tp1_mult": 1.3, "rsi_buy_max_range_end": 62},
+        }
+
         self.symbol_states = {}
         for sym in config.SYMBOLS:
+            merged_params = {**default_params, **SYMBOL_PARAM_OVERRIDES.get(sym, {})}
             self.symbol_states[sym] = {
                 "last_optimized_time": None,
                 "consecutive_losses": 0,
-                "params": {
-                    "rsi_buy_min": 42,
-                    "rsi_buy_max_range_start": 48,
-                    "rsi_buy_max_range_end": 65,
-                    "rsi_sell_max": 58,
-                    "rsi_sell_min_range_start": 35,
-                    "rsi_sell_min_range_end": 52,
-                    "volume_mult": 1.0,
-                    "atr_min_filter": 0.0015,
-                    "cooldown_minutes": 90,
-                    "sl_atr_mult": 1.5,
-                    "tp1_mult": 1.5,
-                    "tp2_mult": 2.5,
-                    "tp3_mult": 4.0,
-                    "trailing_mult": 1.0
-                }
+                "params": self.validate_and_clamp_params(merged_params)
             }
         self.optimization_interval = timedelta(hours=6)
 
