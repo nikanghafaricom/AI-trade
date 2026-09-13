@@ -249,6 +249,7 @@ class AnalysisLayer:
         high_close = (df['high'] - df['close'].shift()).abs()
         low_close = (df['low'] - df['close'].shift()).abs()
         tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+        df['true_range'] = tr
         df['atr'] = tr.rolling(window=14).mean()
 
         df['vol_sma'] = df['volume'].rolling(window=20).mean()
@@ -314,13 +315,20 @@ class AnalysisLayer:
         return "NEUTRAL"
 
     def atr_percentile(self, df: pd.DataFrame, window: int = 100) -> float:
-        """چند درصد کندل‌های اخیر نوسان کمتری از کندل فعلی داشتن - برای تشخیص جهش‌های پارابولیک/خبری"""
-        if df.empty or 'atr' not in df or len(df) < 30:
+        """
+        چند درصد از کندل‌های اخیر نوسان کمتری از کندل *فعلی* داشتن. عمداً از true_range
+        خام همون یک کندل استفاده می‌کنیم، نه از ATR (که میانگین ۱۴تاییه)؛ چون ATR بعد از
+        یک جهش واقعی، ساعت‌ها بالا می‌مونه و باعث می‌شه این فیلتر کاذب و طولانی‌مدت قفل
+        بمونه حتی وقتی نوسان واقعی همون لحظه تموم شده. با true_range تک‌کندلی، فقط وقتی
+        خودِ کندل فعلی واقعاً غیرعادیه رد می‌شه - سخت‌گیری روی کندل‌های واقعاً پارابولیک
+        دقیقاً حفظ می‌مونه.
+        """
+        if df.empty or 'true_range' not in df or len(df) < 30:
             return 50.0
-        recent = df['atr'].tail(window).dropna()
-        if recent.empty or pd.isna(df['atr'].iloc[-1]):
+        recent = df['true_range'].tail(window).dropna()
+        if recent.empty or pd.isna(df['true_range'].iloc[-1]):
             return 50.0
-        current = df['atr'].iloc[-1]
+        current = df['true_range'].iloc[-1]
         return float((recent < current).mean() * 100)
 
 # ==================== هوش مصنوعی پیشرفته اختصاصی و ضد ضرر ====================
