@@ -428,7 +428,7 @@ class AIParameterOptimizer:
             return True
         return datetime.now() - state["last_optimized_time"] >= self.optimization_interval
 
-    def optimize_symbol_parameters(self, symbol: str, df_15m: pd.DataFrame):
+    def optimize_symbol_parameters(self, symbol: str, df_15m: pd.DataFrame, journal: Optional["TradeJournal"] = None):
         if not self.groq_api_key or df_15m.empty:
             return
 
@@ -447,10 +447,25 @@ class AIParameterOptimizer:
             "consecutive_losses": state["consecutive_losses"]
         }
 
+        # آمار جداگانه‌ی عملکرد اخیر BUY و SELL این ارز - صرفاً اطلاعاتیه، خودش هیچ
+        # فیلتری اعمال نمی‌کنه؛ فقط به AI کمک می‌کنه بفهمه مشکل اخیر مال کدوم سمته
+        side_perf_note = ""
+        if journal is not None:
+            buy_perf = journal.get_side_performance(symbol, "BUY")
+            sell_perf = journal.get_side_performance(symbol, "SELL")
+            market_metrics["recent_buy_performance"] = buy_perf
+            market_metrics["recent_sell_performance"] = sell_perf
+            side_perf_note = """
+IMPORTANT - side-specific tuning guidance:
+"recent_buy_performance" and "recent_sell_performance" show this symbol's last trades broken down by side (win_rate, avg_r, count; null/0 means not enough data yet - ignore in that case).
+If BUY has recently underperformed while SELL has not (or vice versa), prefer adjusting the side-specific keys (rsi_buy_min, rsi_buy_max_range_start, rsi_buy_max_range_end for BUY; rsi_sell_max, rsi_sell_min_range_start, rsi_sell_min_range_end for SELL) rather than the shared risk keys (sl_atr_mult, tp1_mult, tp2_mult, tp3_mult, atr_min_filter, volume_mult, cooldown_minutes, trailing_mult), since those shared keys affect both sides and unnecessarily reducing them would also cut down the healthy side's signal frequency.
+Never make changes so aggressive that they would effectively stop signals from being generated at all - stay within reasonable, moderate adjustments.
+"""
+
         prompt = f"""
 You are an advanced quantitative trading AI. First, analyze the following key market data and indicators for asset {symbol}:
 {json.dumps(market_metrics, indent=2)}
-
+{side_perf_note}
 Based on these specific conditions, dynamically tune the trading parameters to adapt to the current market regime.
 Keep risk management strict to prevent losses, but allow reasonable flexibility so the bot can capture valid opportunities within safe logical boundaries.
 Return ONLY valid JSON with the exact same keys as these default parameters:
@@ -729,6 +744,42 @@ class TradeJournal:
         today = date_cls.today().isoformat()
         return sum(r["pnl_usdt"] for r in self.records if r["date"] == today)
 
+    def get_side_performance(self, symbol: str, side: str, lookback: int = 15) -> Dict:
+        """
+        آمار برد/باخت جداگانه برای یک سمت مشخص (BUY یا SELL) روی یک ارز، محدود به
+        N رخداد اخیر. این متد فقط اطلاعات برمی‌گردونه - هیچ سیگنالی رو رد یا تایید
+        نمی‌کنه و هیچ فیلتری اعمال نمی‌کنه.
+        """
+        side_records = [r for r in self.records if r["symbol"] == symbol and r["side"] == side]
+        if not side_records:
+            return {"count": 0, "win_rate": None, "avg_r": None, "total_pnl_usdt": 0.0}
+        recent = side_records[-lookback:]
+        wins = [r for r in recent if r["pnl_usdt"] > 0]
+        return {
+            "count": len(recent),
+            "win_rate": round((len(wins) / len(recent)) * 100, 1),
+            "avg_r": round(sum(r["r_multiple"] for r in recent) / len(recent), 2),
+            "total_pnl_usdt": round(sum(r["pnl_usdt"] for r in recent), 2)
+        }
+
+    def get_side_stats_for_date(self, for_date: str) -> Dict[str, Dict]:
+        """آمار جداگانه‌ی BUY/SELL برای یک روز مشخص - برای گزارش روزانه"""
+        day_records = [r for r in self.records if r["date"] == for_date]
+        result = {}
+        for side in ["BUY", "SELL"]:
+            side_recs = [r for r in day_records if r["side"] == side]
+            if not side_recs:
+                result[side] = {"count": 0, "win_rate": 0.0, "avg_r": 0.0, "total_pnl": 0.0}
+                continue
+            wins = [r for r in side_recs if r["pnl_usdt"] > 0]
+            result[side] = {
+                "count": len(side_recs),
+                "win_rate": round((len(wins) / len(side_recs)) * 100, 1),
+                "avg_r": round(sum(r["r_multiple"] for r in side_recs) / len(side_recs), 2),
+                "total_pnl": round(sum(r["pnl_usdt"] for r in side_recs), 2)
+            }
+        return result
+
     def build_daily_summary(self, for_date: str) -> Optional[str]:
         day_records = [r for r in self.records if r["date"] == for_date]
         if not day_records:
@@ -738,14 +789,21 @@ class TradeJournal:
         losses = [r for r in day_records if r["pnl_usdt"] <= 0]
         win_rate = (len(wins) / len(day_records)) * 100 if day_records else 0
         avg_r = sum(r["r_multiple"] for r in day_records) / len(day_records) if day_records else 0
+
+        side_stats = self.get_side_stats_for_date(for_date)
+        buy_s, sell_s = side_stats["BUY"], side_stats["SELL"]
+
         return f"""
 📊 **گزارش عملکرد روزانه ({for_date})**
 
 🔢 تعداد رخدادهای بسته‌شده: {len(day_records)}
 ✅ برد: {len(wins)} | ❌ باخت: {len(losses)}
-🎯 نرخ برد: {win_rate:.1f}%
+🎯 نرخ برد کل: {win_rate:.1f}%
 📈 سود/زیان کل: {total_pnl:+.2f} USDT
 📐 میانگین R به‌ازای هر رخداد: {avg_r:+.2f}R
+
+🟢 **BUY (Long):** {buy_s['count']} رخداد | نرخ برد {buy_s['win_rate']:.1f}% | میانگین R {buy_s['avg_r']:+.2f} | PnL {buy_s['total_pnl']:+.2f} USDT
+🔴 **SELL (Short):** {sell_s['count']} رخداد | نرخ برد {sell_s['win_rate']:.1f}% | میانگین R {sell_s['avg_r']:+.2f} | PnL {sell_s['total_pnl']:+.2f} USDT
 """
 
 # ==================== ماژول معامله مجازی: حجم واقعی، پله‌ای، تریلینگ واقعی ====================
@@ -1022,7 +1080,7 @@ class HybridTradingSystem:
 
             if self.ai_optimizer.should_optimize(symbol):
                 logger.info(f"بروزرسانی پارامترهای ضد ضرر هوش مصنوعی برای {symbol}...")
-                self.ai_optimizer.optimize_symbol_parameters(symbol, df_15m)
+                self.ai_optimizer.optimize_symbol_parameters(symbol, df_15m, journal=self.journal)
 
             df_1h = self.data.fetch_ohlcv(symbol, timeframe=self.config.CONFIRM_TIMEFRAME)
             df_1h = self.analysis.calculate_indicators(df_1h)
