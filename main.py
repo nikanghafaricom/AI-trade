@@ -160,6 +160,65 @@ class DataLayer:
             logger.error(f"خطا در دریافت داده {symbol} در تایم‌فریم {timeframe}: {e}")
             return pd.DataFrame()
 
+    def fetch_funding_rate(self, symbol: str) -> Optional[float]:
+        """
+        نرخ فاندینگ بازار پرپچوال همون ارز - نشون‌دهنده‌ی ازدحام معامله‌گران لانگ/شورت.
+        کاملاً best-effort: چون این نمونه‌ی exchange روی حالت spot تنظیم شده، ممکنه این
+        صرافی/نسخه‌ی ccxt از fetch_funding_rate برای این سیمبل پشتیبانی نکنه - هر خطایی
+        بی‌صدا نادیده گرفته می‌شه و None برمی‌گرده (یعنی هیچ تاثیری روی امتیاز سیگنال نداره).
+        """
+        try:
+            funding_symbol = symbol.replace("/USDT", "/USDT:USDT")
+            data = self.exchange.fetch_funding_rate(funding_symbol)
+            rate = data.get("fundingRate") if data else None
+            return float(rate) if rate is not None else None
+        except Exception:
+            return None
+
+    def fetch_spread_pct(self, symbol: str) -> Optional[float]:
+        """درصد اسپرد بید/اسک لحظه‌ای - برای شناسایی نقدینگی غیرعادی نازک. best-effort."""
+        try:
+            ob = self.exchange.fetch_order_book(symbol, limit=5)
+            best_bid = ob['bids'][0][0] if ob.get('bids') else None
+            best_ask = ob['asks'][0][0] if ob.get('asks') else None
+            if not best_bid or not best_ask:
+                return None
+            mid = (best_bid + best_ask) / 2
+            if mid <= 0:
+                return None
+            return float((best_ask - best_bid) / mid * 100)
+        except Exception:
+            return None
+
+# ==================== منابع داده‌ی کلان/فرابازاری (مستقل از هر ارز خاص) ====================
+class MacroDataLayer:
+    """
+    داده‌ی سنتیمنت و رژیم کلی بازار که روی جهت‌گیری کلی همه‌ی ارزها اثر می‌ذاره، نه فقط
+    یکی. طوری طراحی شده که در بدترین حالت (قطعی اینترنت، خطای API) کاملاً بی‌خطر
+    fallback کنه: هیچ‌وقت باعث توقف بات یا رد نامعتبر یه سیگنال نمی‌شه، فقط اون بخش از
+    تعدیل امتیاز غیرفعال می‌مونه.
+    """
+    def __init__(self):
+        self._fng_value: Optional[int] = None
+        self._fng_last_fetch: float = 0.0
+        self._fng_cache_seconds = 3600  # شاخص ترس‌وطمع روزانه‌ست؛ هر ۱ ساعت رفرش کافیه
+
+    def get_fear_greed_index(self) -> Optional[int]:
+        now = time.time()
+        if self._fng_value is not None and (now - self._fng_last_fetch) < self._fng_cache_seconds:
+            return self._fng_value
+        try:
+            resp = requests.get("https://api.alternative.me/fng/?limit=1", timeout=8)
+            if resp.status_code == 200:
+                data = resp.json()
+                value = int(data["data"][0]["value"])
+                self._fng_value = value
+                self._fng_last_fetch = now
+                return value
+        except Exception as e:
+            logger.warning(f"دریافت شاخص ترس‌وطمع بازار ناموفق بود (نادیده گرفته می‌شه): {e}")
+        return self._fng_value
+
 # ==================== لایه تحلیل، ساختار بازار و رژیم نوسان ====================
 class AnalysisLayer:
     def __init__(self, config: Config):
@@ -608,7 +667,8 @@ class SignalEngine:
             score += 0.75
         return score
 
-    def get_rule_signal(self, symbol: str, df_15m: pd.DataFrame, df_1h: pd.DataFrame, trend_4h: str) -> Tuple[Optional[str], dict]:
+    def get_rule_signal(self, symbol: str, df_15m: pd.DataFrame, df_1h: pd.DataFrame, trend_4h: str,
+                         macro_context: Optional[dict] = None) -> Tuple[Optional[str], dict]:
         if df_15m.empty or len(df_15m) < 30:
             return None, {}
         if self.ai_optimizer.is_blacklisted(symbol):
@@ -623,6 +683,20 @@ class SignalEngine:
         if pd.isna(latest['rsi']) or pd.isna(latest['ema_fast']) or pd.isna(latest['atr']):
             return None, {}
         if latest['atr'] < (latest['close'] * p["atr_min_filter"]):
+            return None, {}
+
+        macro_context = macro_context or {}
+        fng = macro_context.get("fear_greed")
+        btc_trend_4h = macro_context.get("btc_trend_4h")
+        btc_structure = macro_context.get("btc_structure")
+        funding_rate = macro_context.get("funding_rate")
+        spread_pct = macro_context.get("spread_pct")
+
+        # فیلتر اجرایی (نه امتیازی): اسپرد بید/اسک خیلی گشاد یعنی نقدینگی لحظه‌ای غیرعادیه
+        # و قیمت واقعی پرشده می‌تونه به‌شدت با قیمت تحلیل‌شده فرق کنه. آستانه عمداً خیلی
+        # بازه (۰.۸٪) که فقط شرایط واقعاً غیرعادی رو می‌گیره، نه نوسان معمولی بازار.
+        if spread_pct is not None and spread_pct > 0.8:
+            logger.info(f"{symbol}: اسپرد لحظه‌ای غیرعادی ({spread_pct:.2f}%) - سیگنال رد شد")
             return None, {}
 
         # فیلتر رژیم نوسان: از کندل‌های پارابولیک/جهش خبری عبور می‌کنیم
@@ -651,6 +725,31 @@ class SignalEngine:
         if sell_score > 0 and self.analysis.is_mtf_aligned(df_1h, "SELL"):
             sell_score += 1.5
 
+        # تعدیل امتیاز بر اساس رژیم کلان بیت‌کوین (لیدر بازار). جمع‌جبریه، نه یه رد
+        # یک‌طرفه: در ریزش هماهنگ کل بازار از BUY آلت‌کوین‌ها کم می‌کنه، در صعود هماهنگ
+        # بهش اضافه می‌کنه، در حالت خنثی هیچ اثری نداره.
+        if symbol != "BTC/USDT" and btc_trend_4h and btc_structure:
+            if btc_trend_4h == "BEARISH" and btc_structure == "BEARISH":
+                buy_score -= 1.0
+                sell_score += 0.5
+            elif btc_trend_4h == "BULLISH" and btc_structure == "BULLISH":
+                buy_score += 1.0
+                sell_score -= 0.5
+
+        # تعدیل امتیاز بر اساس شاخص ترس‌وطمع بازار (سنتیمنت کلی)
+        if fng is not None:
+            if fng <= 20:
+                buy_score += 0.5
+            elif fng >= 80:
+                buy_score -= 0.5
+
+        # تعدیل امتیاز بر اساس نرخ فاندینگ (ازدحام معامله‌گران در بازار فیوچرز)
+        if funding_rate is not None:
+            if funding_rate > 0.0005:
+                buy_score -= 0.5
+            elif funding_rate < -0.0005:
+                buy_score += 0.5
+
         threshold = self.config.MIN_SIGNAL_SCORE
         vol_ratio = latest['volume'] / latest['vol_sma'] if latest['vol_sma'] else 0
         diagnostics = {
@@ -662,6 +761,11 @@ class SignalEngine:
             "atr_percentile_100candles": round(pctl, 1),
             "mtf_1h_aligned": self.analysis.is_mtf_aligned(df_1h, "BUY" if buy_score >= sell_score else "SELL"),
             "consecutive_losses_this_symbol": self.ai_optimizer.symbol_states[symbol]["consecutive_losses"],
+            "fear_greed_index": fng,
+            "btc_macro_trend_4h": btc_trend_4h,
+            "btc_macro_structure": btc_structure,
+            "funding_rate": funding_rate,
+            "spread_pct": round(spread_pct, 3) if spread_pct is not None else None,
         }
         if buy_score >= threshold and buy_score > sell_score:
             diagnostics["quant_score"] = round(buy_score, 2)
@@ -1060,6 +1164,7 @@ class HybridTradingSystem:
         self.config.validate()
         self.data = DataLayer(self.config)
         self.analysis = AnalysisLayer(self.config)
+        self.macro_data = MacroDataLayer()
         self.ai_optimizer = AIParameterOptimizer(self.config)
         self.signal_engine = SignalEngine(self.config, self.ai_optimizer, self.analysis)
         self.risk_manager = RiskManager(self.config)
@@ -1071,7 +1176,32 @@ class HybridTradingSystem:
         self.last_summary_date: Optional[str] = date_cls.today().isoformat()
         self.kill_switch_warned_today = False
 
-    def process_symbol(self, symbol: str):
+    def _build_macro_context(self) -> dict:
+        """
+        زمینه‌ی کلان بازار که یک‌بار در هر چرخه ساخته می‌شه (نه به‌ازای هر ارز، برای صرفه‌جویی
+        در تعداد فراخوانی). هر بخشش کاملاً مستقل و fail-safe هست: اگه یکی خطا بده، فقط
+        همون مقدار None می‌مونه و بقیه‌ی سیستم عادی کار می‌کنه.
+        """
+        context = {"fear_greed": None, "btc_trend_4h": None, "btc_structure": None}
+        try:
+            context["fear_greed"] = self.macro_data.get_fear_greed_index()
+        except Exception as e:
+            logger.warning(f"خطا در دریافت شاخص ترس‌وطمع: {e}")
+
+        try:
+            btc_df_4h = self.data.fetch_ohlcv("BTC/USDT", timeframe=self.config.TREND_TIMEFRAME)
+            btc_df_4h = self.analysis.calculate_indicators(btc_df_4h)
+            context["btc_trend_4h"] = self.analysis.get_major_trend(btc_df_4h)
+
+            btc_df_15m = self.data.fetch_ohlcv("BTC/USDT", timeframe=self.config.ENTRY_TIMEFRAME)
+            btc_df_15m = self.analysis.calculate_indicators(btc_df_15m)
+            context["btc_structure"] = self.analysis.market_structure(btc_df_15m)
+        except Exception as e:
+            logger.warning(f"خطا در ساخت زمینه‌ی کلان بیت‌کوین: {e}")
+
+        return context
+
+    def process_symbol(self, symbol: str, macro_context: Optional[dict] = None):
         try:
             df_15m = self.data.fetch_ohlcv(symbol, timeframe=self.config.ENTRY_TIMEFRAME)
             df_15m = self.analysis.calculate_indicators(df_15m)
@@ -1089,7 +1219,12 @@ class HybridTradingSystem:
             df_4h = self.analysis.calculate_indicators(df_4h)
             trend_4h = self.analysis.get_major_trend(df_4h)
 
-            rule_signal, diagnostics = self.signal_engine.get_rule_signal(symbol, df_15m, df_1h, trend_4h)
+            # داده‌ی فرابازاری مختص همین ارز (best-effort، هر کدوم می‌تونه None باشه)
+            symbol_macro_context = dict(macro_context or {})
+            symbol_macro_context["funding_rate"] = self.data.fetch_funding_rate(symbol)
+            symbol_macro_context["spread_pct"] = self.data.fetch_spread_pct(symbol)
+
+            rule_signal, diagnostics = self.signal_engine.get_rule_signal(symbol, df_15m, df_1h, trend_4h, symbol_macro_context)
             if not rule_signal:
                 return
 
@@ -1155,8 +1290,9 @@ class HybridTradingSystem:
     def run_once(self):
         logger.info("----- شروع آنالیز ایمن و ضد ضرر بازار -----")
         self._check_daily_rollover()
+        macro_context = self._build_macro_context()
         for symbol in self.config.SYMBOLS:
-            self.process_symbol(symbol)
+            self.process_symbol(symbol, macro_context)
             time.sleep(1.5)
         self.paper_trader.update_and_check_trades(self.data)
 
@@ -1176,6 +1312,7 @@ class HybridTradingSystem:
 • فیلتر رژیم نوسان + تریلینگ استاپ واقعی
 • ژورنال معاملات و گزارش روزانه Win-rate/Expectancy
 • لایه‌ی قضاوت discretionary AI روی هر سیگنال (شبیه تریدر انسانی باتجربه، حداقل اطمینان {self.config.MIN_JUDGE_CONFIDENCE}%)
+• داده‌ی فرابازاری: شاخص ترس‌وطمع، رژیم کلان بیت‌کوین، فاندینگ ریت و اسپرد لحظه‌ای (best-effort)
 """
         self.telegram.send_system_status(start_message)
 
