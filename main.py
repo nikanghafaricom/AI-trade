@@ -748,6 +748,11 @@ class SignalEngine:
         btc_structure = macro_context.get("btc_structure")
         funding_rate = macro_context.get("funding_rate")
         spread_pct = macro_context.get("spread_pct")
+        btc_rsi = macro_context.get("btc_rsi")
+        btc_macd_hist = macro_context.get("btc_macd_hist")
+        # این ارز *الان* واقعاً هم‌جهت با بیت‌کوینه یا نه - برای هر دو بخشی که می‌خوان از
+        # وضعیت بیت‌کوین کمک بگیرن (تحلیل تکنیکال زنده + سلامت معامله‌ی مرجع) یک‌بار محاسبه می‌شه
+        btc_aligned_now = symbol != "BTC/USDT" and bool(btc_trend_4h) and btc_trend_4h == trend_4h and btc_trend_4h != "NEUTRAL"
 
         # فیلتر اجرایی (نه امتیازی): اسپرد بید/اسک خیلی گشاد یعنی نقدینگی لحظه‌ای غیرعادیه
         # و قیمت واقعی پرشده می‌تونه به‌شدت با قیمت تحلیل‌شده فرق کنه. آستانه عمداً خیلی
@@ -806,13 +811,34 @@ class SignalEngine:
             elif funding_rate < -0.0005:
                 buy_score += 0.5
 
+        # تحلیل زنده‌ی وضعیت تکنیکال خودِ بیت‌کوین، مستقل از اینکه بیت‌کوین الان سیگنال یا
+        # معامله‌ی باز داره یا نه. فقط وقتی این ارز الان واقعاً هم‌جهت با بیت‌کوینه فعال
+        # می‌شه. هدف: حتی وقتی بیت‌کوین چیزی برای معامله نداره، وضعیت لحظه‌ای‌ش (RSI،
+        # مومنتوم MACD) به‌عنوان یه کمک جانبی برای ارزهای وابسته در نظر گرفته بشه.
+        if btc_aligned_now and btc_rsi is not None:
+            if btc_trend_4h == "BULLISH":
+                if 50 <= btc_rsi <= 68:
+                    buy_score += 0.3
+                elif btc_rsi > 75:
+                    buy_score -= 0.3
+            elif btc_trend_4h == "BEARISH":
+                if 32 <= btc_rsi <= 50:
+                    sell_score += 0.3
+                elif btc_rsi < 25:
+                    sell_score -= 0.3
+
+        if btc_aligned_now and btc_macd_hist is not None:
+            if btc_trend_4h == "BULLISH" and btc_macd_hist > 0:
+                buy_score += 0.2
+            elif btc_trend_4h == "BEARISH" and btc_macd_hist < 0:
+                sell_score += 0.2
+
         # الگوگیری محدود از وضعیت معامله‌ی مرجع بیت‌کوین (باز یا به‌تازگی بسته‌شده).
         # فقط وقتی این ارز *الان* واقعاً هم‌جهت با بیت‌کوینه (روند ۴ساعته‌ش دقیقاً مثل
         # بیت‌کوین صعودی یا دقیقاً مثل بیت‌کوین نزولیه) فعال می‌شه - نه هر ارزی، نه همیشه.
         # نه خودِ بیت‌کوین، نه PAXG که عمداً به‌عنوان دارایی کم‌همبسته اضافه شده.
         # جمع‌جبریه: نه قطعی، نه غالب.
         btc_reference_trade = macro_context.get("btc_reference_trade")
-        btc_aligned_now = bool(btc_trend_4h) and btc_trend_4h == trend_4h and btc_trend_4h != "NEUTRAL"
         if symbol not in ("BTC/USDT", "PAXG/USDT") and btc_aligned_now and btc_reference_trade:
             ref_side = btc_reference_trade.get("side")
             ref_health = btc_reference_trade.get("health", 0) or 0
@@ -849,8 +875,11 @@ class SignalEngine:
             "spread_pct": round(spread_pct, 3) if spread_pct is not None else None,
             "btc_reference_trade": btc_reference_trade,
             "btc_aligned_now": btc_aligned_now,
+            "btc_rsi": round(btc_rsi, 1) if btc_rsi is not None else None,
+            "btc_macd_hist": round(btc_macd_hist, 6) if btc_macd_hist is not None else None,
         }
-        macro_log = (f"FNG={fng} BTC_trend={btc_trend_4h}/{btc_structure} funding={funding_rate} "
+        macro_log = (f"FNG={fng} BTC_trend={btc_trend_4h}/{btc_structure} BTC_RSI={diagnostics['btc_rsi']} "
+                     f"BTC_MACD={diagnostics['btc_macd_hist']} funding={funding_rate} "
                      f"spread={diagnostics['spread_pct']} btc_ref={btc_reference_trade} aligned={btc_aligned_now}")
         if buy_score >= threshold and buy_score > sell_score:
             diagnostics["quant_score"] = round(buy_score, 2)
@@ -1367,7 +1396,7 @@ class HybridTradingSystem:
         همون مقدار None می‌مونه و بقیه‌ی سیستم عادی کار می‌کنه.
         """
         context = {"fear_greed": None, "btc_trend_4h": None, "btc_structure": None, "btc_volatility_pctl": None,
-                   "btc_reference_trade": None}
+                   "btc_reference_trade": None, "btc_rsi": None, "btc_macd_hist": None}
         try:
             context["fear_greed"] = self.macro_data.get_fear_greed_index()
         except Exception as e:
@@ -1390,6 +1419,14 @@ class HybridTradingSystem:
             # "استرس سراسری بازار" - چون بیت‌کوین لیدر بازاره، وقتی خودش به‌شدت پرنوسان
             # می‌شه، معمولاً کل بازار (نه فقط یه ارز) داره تکون می‌خوره
             context["btc_volatility_pctl"] = self.analysis.atr_percentile(btc_df_15m)
+            # وضعیت تکنیکال زنده‌ی بیت‌کوین (RSI و مومنتوم MACD) - مستقل از اینکه بیت‌کوین
+            # الان سیگنال یا معامله‌ای داره یا نه، تا ارزهای هم‌جهت باهاش بتونن ازش کمک بگیرن
+            if not btc_df_15m.empty:
+                btc_latest = btc_df_15m.iloc[-1]
+                if not pd.isna(btc_latest.get('rsi', float('nan'))):
+                    context["btc_rsi"] = float(btc_latest['rsi'])
+                if not pd.isna(btc_latest.get('macd_hist', float('nan'))):
+                    context["btc_macd_hist"] = float(btc_latest['macd_hist'])
         except Exception as e:
             logger.warning(f"خطا در ساخت زمینه‌ی کلان بیت‌کوین: {e}")
 
