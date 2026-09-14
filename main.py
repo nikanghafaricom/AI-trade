@@ -340,7 +340,12 @@ class AIParameterOptimizer:
         self.groq_api_key = config.GROQ_API_KEY
         self.groq_endpoint = "https://api.groq.com/openai/"
 
-        self.blacklist: Dict[str, datetime] = {}
+        self.blacklist: Dict[str, dict] = {}
+        # کف زمانی امن قبل از اینکه اصلاً اجازه بدیم شرایط بازار رو برای آزادسازی زودهنگام
+        # چک کنیم - جلوی برگشت فوری به وسط همون شوک/افت اولیه رو می‌گیره
+        self.BLACKLIST_MIN_COOLDOWN_MINUTES = 20
+        # آستانه‌ی پرسنتایل نوسان لحظه‌ای که پایین‌ترش یعنی "آروم شده، می‌تونیم برگردیم"
+        self.BLACKLIST_EARLY_RELEASE_PCTL = 70
 
         # سقف‌های محافظه‌کارانه برای retry روی خطای ۴۲۹ (rate limit)
         self.MAX_RETRIES_429 = 2
@@ -372,7 +377,12 @@ class AIParameterOptimizer:
             "tp1_mult": 1.5,
             "tp2_mult": 2.5,
             "tp3_mult": 4.0,
-            "trailing_mult": 1.0
+            "trailing_mult": 1.0,
+            # دو پارامتر جدید مدیریت استرس بازار: نه ثابت‌شده توسط ما، بلکه در یک بازه‌ی
+            # منطقی (به validate_and_clamp_params نگاه کن) توسط همین موتور AI هر ۶ ساعت
+            # بر اساس شرایط واقعی بازار تنظیم می‌شن.
+            "stress_pctl_threshold": 88,  # از چه پرسنتایل نوسان بیت‌کوینی به بعد "استرس بازار" حساب بشه
+            "stress_size_mult": 0.6       # حجم پوزیشن در شرایط استرس چند برابر حجم عادی بشه
         }
 
         # تنظیم اولیه‌ی مختص هر ارز: فقط نقطه‌ی شروع رو بر اساس شخصیت/نوسان طبیعی هر دارایی
@@ -406,20 +416,46 @@ class AIParameterOptimizer:
             }
         self.optimization_interval = timedelta(hours=6)
 
-    def is_blacklisted(self, symbol: str) -> bool:
-        if symbol in self.blacklist:
-            if datetime.now() < self.blacklist[symbol]:
-                return True
-            else:
-                del self.blacklist[symbol]
-        return False
+    def is_blacklisted(self, symbol: str, current_pctl: Optional[float] = None) -> bool:
+        """
+        به‌جای یه تایمر کور، این ارز رو زیر یه چتر نظارتی می‌بره: تا وقتی نوسان لحظه‌ای‌ش
+        (پرسنتایل true_range تک‌کندلی) به حالت عادی برنگرده، مسدود می‌مونه - نه صرفاً چون
+        زمان مشخصی گذشته. دو محافظ هم داره:
+        ۱. یه کف زمانی امن (BLACKLIST_MIN_COOLDOWN_MINUTES) که بلافاصله بعد ضرر دوباره وارد
+           نشه، چون اون لحظه معمولاً هنوز داخل همون شوک/افت اولیه‌ایم.
+        ۲. یه سقف زمانی نهایی (همون منطق قبلی، بر اساس تعداد ضررهای متوالی) که در نبود
+           بهبود واقعی، بالاخره آزاد بشه.
+        """
+        if symbol not in self.blacklist:
+            return False
+
+        entry = self.blacklist[symbol]
+        now = datetime.now()
+
+        if now >= entry["hard_release_at"]:
+            del self.blacklist[symbol]
+            return False
+
+        if now - entry["blocked_at"] < timedelta(minutes=self.BLACKLIST_MIN_COOLDOWN_MINUTES):
+            return True
+
+        if current_pctl is not None and current_pctl < self.BLACKLIST_EARLY_RELEASE_PCTL:
+            logger.info(f"سیستم ضد ضرر: {symbol} زودتر از موعد آزاد شد چون نوسان لحظه‌ای به حالت عادی برگشته (پرسنتایل {current_pctl:.0f})")
+            del self.blacklist[symbol]
+            return False
+
+        return True
 
     def register_loss(self, symbol: str):
         state = self.symbol_states[symbol]
         state["consecutive_losses"] += 1
         penalty_hours = min(1.5 * state["consecutive_losses"], 6)
-        self.blacklist[symbol] = datetime.now() + timedelta(hours=penalty_hours)
-        logger.warning(f"سیستم ضد ضرر: ارز {symbol} به دلیل ضرر متوالی به مدت {penalty_hours:.1f} ساعت مسدود شد.")
+        now = datetime.now()
+        self.blacklist[symbol] = {
+            "blocked_at": now,
+            "hard_release_at": now + timedelta(hours=penalty_hours)
+        }
+        logger.warning(f"سیستم ضد ضرر: ارز {symbol} زیر نظارت رفت - حداکثر تا {penalty_hours:.1f} ساعت مسدود می‌مونه، مگر اینکه زودتر شرایط بازار آروم بشه.")
 
     def register_win(self, symbol: str):
         state = self.symbol_states[symbol]
@@ -447,6 +483,12 @@ class AIParameterOptimizer:
         clamped["tp2_mult"] = max(2.0, min(float(new_params.get("tp2_mult", 2.5)), 5.0))
         clamped["tp3_mult"] = max(3.0, min(float(new_params.get("tp3_mult", 4.0)), 8.0))
         clamped["trailing_mult"] = max(0.8, min(float(new_params.get("trailing_mult", 1.0)), 2.0))
+
+        # بازه‌ی منطقی برای پارامترهای استرس بازار: نه اونقدر بالا/شل که عملاً هیچ‌وقت
+        # فعال نشه (نزدیک ۱۰۰)، نه اونقدر پایین/سفت که مدام و بی‌مورد فعال بشه (نزدیک ۵۰)
+        clamped["stress_pctl_threshold"] = max(80, min(float(new_params.get("stress_pctl_threshold", 88)), 95))
+        # نه اونقدر نزدیک ۱ که عملاً هیچ کاهشی نده، نه اونقدر نزدیک صفر که عملاً معامله رو بی‌اثر کنه
+        clamped["stress_size_mult"] = max(0.4, min(float(new_params.get("stress_size_mult", 0.6)), 0.85))
         return clamped
 
     def _wait_for_groq_slot(self):
@@ -681,7 +723,12 @@ class SignalEngine:
                          macro_context: Optional[dict] = None) -> Tuple[Optional[str], dict]:
         if df_15m.empty or len(df_15m) < 30:
             return None, {}
-        if self.ai_optimizer.is_blacklisted(symbol):
+
+        # پرسنتایل نوسان لحظه‌ای رو زودتر می‌سنجیم چون هم برای تصمیم رژیم نوسان لازمه،
+        # هم برای اینکه سیستم ضد ضرر بتونه بفهمه آیا بازار آروم شده تا زودتر آزاد کنه یا نه
+        pctl = self.analysis.atr_percentile(df_15m)
+
+        if self.ai_optimizer.is_blacklisted(symbol, current_pctl=pctl):
             return None, {}
         if not self.analysis.is_market_tradable(df_15m):
             return None, {}
@@ -710,7 +757,6 @@ class SignalEngine:
             return None, {}
 
         # فیلتر رژیم نوسان: از کندل‌های پارابولیک/جهش خبری عبور می‌کنیم
-        pctl = self.analysis.atr_percentile(df_15m)
         if pctl > self.config.ATR_PERCENTILE_MAX:
             logger.info(f"{symbol}: نوسان غیرعادی (پرسنتایل {pctl:.0f}) - رد شد")
             return None, {}
@@ -793,9 +839,10 @@ class RiskManager:
     def __init__(self, config: Config):
         self.config = config
 
-    def calculate_position_size(self, entry: float, stop: float) -> float:
-        """ریسک ثابت درصدی: حجم پوزیشن طوری محاسبه می‌شه که ضرر احتمالی دقیقاً برابر RISK_PER_TRADE_PCT سرمایه باشه"""
-        risk_amount = self.config.VIRTUAL_CAPITAL_USDT * (self.config.RISK_PER_TRADE_PCT / 100)
+    def calculate_position_size(self, entry: float, stop: float, size_mult: float = 1.0) -> float:
+        """ریسک ثابت درصدی: حجم پوزیشن طوری محاسبه می‌شه که ضرر احتمالی دقیقاً برابر RISK_PER_TRADE_PCT سرمایه باشه.
+        size_mult یک ضریب اختیاریه (پیش‌فرض ۱.۰ یعنی بدون تغییر) که فقط در شرایط استرس بازار کوچیک‌تر می‌شه."""
+        risk_amount = self.config.VIRTUAL_CAPITAL_USDT * (self.config.RISK_PER_TRADE_PCT / 100) * size_mult
         risk_per_unit = abs(entry - stop)
         if risk_per_unit <= 0:
             return 0.0
@@ -1104,7 +1151,7 @@ class TelegramSender:
             logger.error(f"خطای ارسال پیام شخصی به تلگرام: {e}")
 
     def send_signal(self, symbol: str, side: str, latest: pd.Series, trend_4h: str, timeframe: str,
-                     judge_reason: str = "", judge_confidence: int = 0) -> Optional[Dict]:
+                     judge_reason: str = "", judge_confidence: int = 0, macro_context: Optional[dict] = None) -> Optional[Dict]:
         emoji = "🟢" if side == "BUY" else "🔴"
         direction = "LONG" if side == "BUY" else "SHORT"
         price = float(latest['close'])
@@ -1127,9 +1174,20 @@ class TelegramSender:
             tp3 = round(price - (p["tp3_mult"] * risk), 4)
             stop_loss = round(stop_loss, 4)
 
-        qty = self.risk_manager.calculate_position_size(price, stop_loss)
+        # مدیریت استرس بازار: اگه نوسان لحظه‌ای بیت‌کوین (لیدر بازار) از آستانه‌ی مختص این
+        # ارز (که خودِ AI هر ۶ ساعت در یک بازه‌ی منطقی تنظیمش می‌کنه) بالاتر رفته باشه،
+        # فقط حجم پوزیشن کوچیک‌تر می‌شه - نه بیشتر رد بشه، نه SL/TP تغییر کنه.
+        btc_volatility_pctl = (macro_context or {}).get("btc_volatility_pctl")
+        stress_active = btc_volatility_pctl is not None and btc_volatility_pctl >= p["stress_pctl_threshold"]
+        size_mult = p["stress_size_mult"] if stress_active else 1.0
+
+        qty = self.risk_manager.calculate_position_size(price, stop_loss, size_mult=size_mult)
         notional = qty * price
         rr_ratio = p["tp1_mult"]  # با طراحی سیستم، R:R تا TP1 همیشه برابر tp1_mult (حداقل ۱.۲:۱) است
+
+        stress_note = ""
+        if stress_active:
+            stress_note = f"\n⚠️ **استرس بازار شناسایی شد** (نوسان بیت‌کوین در پرسنتایل {btc_volatility_pctl:.0f}) - حجم پوزیشن به {size_mult*100:.0f}٪ حجم عادی کاهش یافت\n"
 
         message = f"""
 {emoji} **ANTI-LOSS ULTRA SIGNAL: {side} / {direction}**
@@ -1146,7 +1204,7 @@ class TelegramSender:
 
 🛑 **Stop-Loss:** {stop_loss:,}
 ⚖️ **R:R تا TP1:** 1:{rr_ratio:.2f}
-
+{stress_note}
 💰 **پیشنهاد حجم (ریسک {self.config.RISK_PER_TRADE_PCT}% سرمایه):**
   مقدار: {qty:.6f} | ارزش: {notional:,.2f} USDT
 
@@ -1192,7 +1250,7 @@ class HybridTradingSystem:
         در تعداد فراخوانی). هر بخشش کاملاً مستقل و fail-safe هست: اگه یکی خطا بده، فقط
         همون مقدار None می‌مونه و بقیه‌ی سیستم عادی کار می‌کنه.
         """
-        context = {"fear_greed": None, "btc_trend_4h": None, "btc_structure": None}
+        context = {"fear_greed": None, "btc_trend_4h": None, "btc_structure": None, "btc_volatility_pctl": None}
         try:
             context["fear_greed"] = self.macro_data.get_fear_greed_index()
         except Exception as e:
@@ -1206,6 +1264,10 @@ class HybridTradingSystem:
             btc_df_15m = self.data.fetch_ohlcv("BTC/USDT", timeframe=self.config.ENTRY_TIMEFRAME)
             btc_df_15m = self.analysis.calculate_indicators(btc_df_15m)
             context["btc_structure"] = self.analysis.market_structure(btc_df_15m)
+            # پرسنتایل نوسان لحظه‌ای خود بیت‌کوین به‌عنوان یه پروکسی ساده و ارزون برای
+            # "استرس سراسری بازار" - چون بیت‌کوین لیدر بازاره، وقتی خودش به‌شدت پرنوسان
+            # می‌شه، معمولاً کل بازار (نه فقط یه ارز) داره تکون می‌خوره
+            context["btc_volatility_pctl"] = self.analysis.atr_percentile(btc_df_15m)
         except Exception as e:
             logger.warning(f"خطا در ساخت زمینه‌ی کلان بیت‌کوین: {e}")
 
@@ -1269,7 +1331,8 @@ class HybridTradingSystem:
 
             latest = df_15m.iloc[-1]
             trade_data = self.telegram.send_signal(symbol, rule_signal, latest, trend_4h, self.config.ENTRY_TIMEFRAME,
-                                                     judge_reason=judge["reason"], judge_confidence=judge["confidence"])
+                                                     judge_reason=judge["reason"], judge_confidence=judge["confidence"],
+                                                     macro_context=symbol_macro_context)
 
             if trade_data:
                 self.paper_trader.open_virtual_trade(
