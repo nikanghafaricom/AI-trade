@@ -720,7 +720,7 @@ class SignalEngine:
         return score
 
     def get_rule_signal(self, symbol: str, df_15m: pd.DataFrame, df_1h: pd.DataFrame, trend_4h: str,
-                         macro_context: Optional[dict] = None) -> Tuple[Optional[str], dict]:
+                         macro_context: Optional[dict] = None, peer_context: Optional[dict] = None) -> Tuple[Optional[str], dict]:
         if df_15m.empty or len(df_15m) < 30:
             return None, {}
 
@@ -806,6 +806,31 @@ class SignalEngine:
             elif funding_rate < -0.0005:
                 buy_score += 0.5
 
+        # الگوگیری محدود از وضعیت معامله‌ی مرجع بیت‌کوین (باز یا به‌تازگی بسته‌شده).
+        # فقط وقتی این ارز *الان* واقعاً هم‌جهت با بیت‌کوینه (روند ۴ساعته‌ش دقیقاً مثل
+        # بیت‌کوین صعودی یا دقیقاً مثل بیت‌کوین نزولیه) فعال می‌شه - نه هر ارزی، نه همیشه.
+        # نه خودِ بیت‌کوین، نه PAXG که عمداً به‌عنوان دارایی کم‌همبسته اضافه شده.
+        # جمع‌جبریه: نه قطعی، نه غالب.
+        btc_reference_trade = macro_context.get("btc_reference_trade")
+        btc_aligned_now = bool(btc_trend_4h) and btc_trend_4h == trend_4h and btc_trend_4h != "NEUTRAL"
+        if symbol not in ("BTC/USDT", "PAXG/USDT") and btc_aligned_now and btc_reference_trade:
+            ref_side = btc_reference_trade.get("side")
+            ref_health = btc_reference_trade.get("health", 0) or 0
+            if ref_side == "BUY":
+                if ref_health > 0.4:
+                    buy_score += 0.5
+                    sell_score -= 0.5
+                elif ref_health < -0.4:
+                    buy_score -= 0.5
+                    sell_score += 0.5
+            elif ref_side == "SELL":
+                if ref_health > 0.4:
+                    sell_score += 0.5
+                    buy_score -= 0.5
+                elif ref_health < -0.4:
+                    sell_score -= 0.5
+                    buy_score += 0.5
+
         threshold = self.config.MIN_SIGNAL_SCORE
         vol_ratio = latest['volume'] / latest['vol_sma'] if latest['vol_sma'] else 0
         diagnostics = {
@@ -822,14 +847,18 @@ class SignalEngine:
             "btc_macro_structure": btc_structure,
             "funding_rate": funding_rate,
             "spread_pct": round(spread_pct, 3) if spread_pct is not None else None,
+            "btc_reference_trade": btc_reference_trade,
+            "btc_aligned_now": btc_aligned_now,
         }
+        macro_log = (f"FNG={fng} BTC_trend={btc_trend_4h}/{btc_structure} funding={funding_rate} "
+                     f"spread={diagnostics['spread_pct']} btc_ref={btc_reference_trade} aligned={btc_aligned_now}")
         if buy_score >= threshold and buy_score > sell_score:
             diagnostics["quant_score"] = round(buy_score, 2)
-            logger.info(f"{symbol}: امتیاز خرید {buy_score:.2f} (آستانه {threshold}) | ساختار: {structure}")
+            logger.info(f"{symbol}: امتیاز خرید {buy_score:.2f} (آستانه {threshold}) | ساختار: {structure} | {macro_log}")
             return "BUY", diagnostics
         if sell_score >= threshold and sell_score > buy_score:
             diagnostics["quant_score"] = round(sell_score, 2)
-            logger.info(f"{symbol}: امتیاز فروش {sell_score:.2f} (آستانه {threshold}) | ساختار: {structure}")
+            logger.info(f"{symbol}: امتیاز فروش {sell_score:.2f} (آستانه {threshold}) | ساختار: {structure} | {macro_log}")
             return "SELL", diagnostics
 
         return None, {}
@@ -904,6 +933,30 @@ class TradeJournal:
     def get_today_realized_pnl_usdt(self) -> float:
         today = date_cls.today().isoformat()
         return sum(r["pnl_usdt"] for r in self.records if r["date"] == today)
+
+    def get_recent_peer_signal(self, peer_symbols: List[str], side: str, lookback_hours: float = 3.0) -> Optional[Dict]:
+        """
+        آخرین نتیجه‌ی ثبت‌شده (برد/باخت + R) از بین یه سری ارز هم‌گروه/همبسته (شامل
+        بیت‌کوین به‌عنوان ارز مادر)، در یه بازه‌ی زمانی اخیر و با همون جهت (BUY/SELL).
+        فقط اطلاعاتیه که بعداً به‌صورت یه امتیاز تعدیلی کوچیک استفاده می‌شه - نه فیلتر
+        قطعی و نه جایگزین تحلیل خودِ ارز.
+        """
+        cutoff = datetime.now() - timedelta(hours=lookback_hours)
+        candidates = []
+        for r in self.records:
+            if r["symbol"] not in peer_symbols or r["side"] != side:
+                continue
+            try:
+                ts = datetime.fromisoformat(r["timestamp"])
+            except Exception:
+                continue
+            if ts >= cutoff:
+                candidates.append((ts, r))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda x: x[0])
+        latest = candidates[-1][1]
+        return {"symbol": latest["symbol"], "r_multiple": latest["r_multiple"], "pnl_usdt": latest["pnl_usdt"]}
 
     def get_side_performance(self, symbol: str, side: str, lookback: int = 15) -> Dict:
         """
@@ -992,6 +1045,69 @@ class PaperTrader:
                 json.dump(self.active_trades, f, indent=4)
         except Exception as e:
             logger.error(f"خطا در ذخیره معاملات مجازی: {e}")
+
+    def get_open_peer_status(self, peer_symbols: List[str], side: str) -> Optional[str]:
+        """
+        وضعیت تقریبی یکی از معاملات باز روی ارزهای هم‌گروه/همبسته (شامل بیت‌کوین)، با
+        همون جهت - بدون هیچ فراخوانی API اضافه، فقط از داده‌ای که از قبل داریم:
+        "favorable" یعنی حداقل به TP1 خورده (سود قفل‌شده)، "unfavorable" یعنی بدون
+        رسیدن به TP1 مقدار محسوسی در جهت مخالف حرکت کرده، None یعنی خنثی/نامشخص.
+        """
+        for trade in self.active_trades.values():
+            if trade.get("symbol") not in peer_symbols or trade.get("side") != side:
+                continue
+            if trade.get("tp1_hit"):
+                return "favorable"
+            entry = trade.get("entry", 0)
+            if not entry:
+                continue
+            if side == "BUY":
+                adverse_pct = (entry - trade.get("lowest_since_entry", entry)) / entry * 100
+            else:
+                adverse_pct = (trade.get("highest_since_entry", entry) - entry) / entry * 100
+            if adverse_pct > 0.5:
+                return "unfavorable"
+        return None
+
+    def get_reference_trade_health(self, reference_symbol: str, recent_hours: float = 3.0) -> Optional[Dict]:
+        """
+        وضعیت یه معامله‌ی مرجع (مثلاً بیت‌کوین، به‌عنوان ارز مادر بازار) رو برمی‌گردونه -
+        چه هنوز باز باشه چه به‌تازگی بسته شده باشه - تا ارزهای هم‌جهت با اون (فقط تا حدی،
+        نه به‌طور قطعی) بتونن ازش الگو بگیرن. اگه معامله‌ای باز بود، پیشرفتش نسبت به SL/TP
+        سنجیده می‌شه؛ اگه نبود، آخرین رخداد بسته‌شده‌ی این ارز در بازه‌ی اخیر رو برمی‌گردونه.
+
+        خروجی: {"side": "BUY"/"SELL", "health": عددی بین -۱ (بد پیش رفته) تا +۱ (خوب پیش رفته)}
+        یا None اگه هیچ اطلاعاتی در دسترس نباشه.
+        """
+        open_trades = [t for t in self.active_trades.values() if t['symbol'] == reference_symbol]
+        if open_trades:
+            trade = sorted(open_trades, key=lambda t: t['open_time'])[-1]
+            side = trade['side']
+            entry = trade['entry']
+            original_sl = trade['original_sl']
+            risk = abs(entry - original_sl)
+            if risk <= 0:
+                return None
+            if trade.get('tp1_hit'):
+                return {"side": side, "health": 1.0}
+            if side == "BUY":
+                favorable = trade['highest_since_entry'] - entry
+                unfavorable = entry - trade['lowest_since_entry']
+            else:
+                favorable = entry - trade['lowest_since_entry']
+                unfavorable = trade['highest_since_entry'] - entry
+            health = (favorable - unfavorable) / risk
+            return {"side": side, "health": max(-1.0, min(1.0, health))}
+
+        recent_records = [
+            r for r in self.journal.records
+            if r["symbol"] == reference_symbol
+            and datetime.now() - datetime.fromisoformat(r["timestamp"]) <= timedelta(hours=recent_hours)
+        ]
+        if not recent_records:
+            return None
+        last = sorted(recent_records, key=lambda r: r["timestamp"])[-1]
+        return {"side": last["side"], "health": 1.0 if last["pnl_usdt"] > 0 else -1.0}
 
     def open_virtual_trade(self, symbol: str, side: str, entry_price: float, tp1: float, tp2: float, tp3: float,
                             sl: float, qty: float, atr_at_entry: float):
@@ -1250,11 +1366,17 @@ class HybridTradingSystem:
         در تعداد فراخوانی). هر بخشش کاملاً مستقل و fail-safe هست: اگه یکی خطا بده، فقط
         همون مقدار None می‌مونه و بقیه‌ی سیستم عادی کار می‌کنه.
         """
-        context = {"fear_greed": None, "btc_trend_4h": None, "btc_structure": None, "btc_volatility_pctl": None}
+        context = {"fear_greed": None, "btc_trend_4h": None, "btc_structure": None, "btc_volatility_pctl": None,
+                   "btc_reference_trade": None}
         try:
             context["fear_greed"] = self.macro_data.get_fear_greed_index()
         except Exception as e:
             logger.warning(f"خطا در دریافت شاخص ترس‌وطمع: {e}")
+
+        try:
+            context["btc_reference_trade"] = self.paper_trader.get_reference_trade_health("BTC/USDT")
+        except Exception as e:
+            logger.warning(f"خطا در دریافت وضعیت معامله‌ی مرجع بیت‌کوین: {e}")
 
         try:
             btc_df_4h = self.data.fetch_ohlcv("BTC/USDT", timeframe=self.config.TREND_TIMEFRAME)
