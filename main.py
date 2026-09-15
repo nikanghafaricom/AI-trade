@@ -324,55 +324,6 @@ class AnalysisLayer:
         current = df['true_range'].iloc[-1]
         return float((recent < current).mean() * 100)
 
-# ==================== ردیاب سهمیه‌ی رایگان Groq ====================
-class GroqQuotaTracker:
-    """
-    سقف‌های واقعیِ پلن رایگان Groq برای مدل openai/gpt-oss-120b (بررسی‌شده از
-    console.groq.com/docs/rate-limits، سپتامبر ۲۰۲۶): ۳۰ درخواست/دقیقه،
-    ۱٬۰۰۰ درخواست/روز، ۸٬۰۰۰ توکن/دقیقه، ۲۰۰٬۰۰۰ توکن/روز - این سقف‌ها برای
-    کل سازمان مشترکه (نه هر تابع/کاربر جداگانه).
-
-    به‌جای شمارش دستی مصرف (که با ساعت ریست واقعی سرور Groq هماهنگ نیست)، از
-    خودِ هدرهای x-ratelimit-remaining-* که Groq بعد از هر پاسخ برمی‌گردونه
-    استفاده می‌کنیم - دقیق‌تره و خودش با ریست واقعی سهمیه هماهنگه.
-
-    اولویت‌بندی: لایه‌ی قضاوت معامله (evaluate_trade_candidate) روی تصمیم واقعی
-    معامله اثر می‌ذاره، پس آستانه‌ی توقفش خیلی پایین‌تره (تقریباً تا آخرین لحظه
-    ادامه می‌ده). تنظیم پارامتر دوره‌ای (optimize_symbol_parameters) صرفاً
-    بهینه‌سازیه، پس با آستانه‌ی محافظه‌کارتر زودتر متوقف می‌شه تا سهمیه برای
-    لایه‌ی قضاوت باقی بمونه.
-    """
-    def __init__(self):
-        self.remaining_requests: Optional[int] = None
-        self.remaining_tokens: Optional[int] = None
-        self.last_updated: Optional[datetime] = None
-        self.OPTIMIZER_MIN_REMAINING_REQUESTS = 60
-        self.OPTIMIZER_MIN_REMAINING_TOKENS = 15000
-        self.JUDGE_MIN_REMAINING_REQUESTS = 5
-        self.JUDGE_MIN_REMAINING_TOKENS = 1000
-
-    def update_from_headers(self, headers) -> None:
-        try:
-            if "x-ratelimit-remaining-requests" in headers:
-                self.remaining_requests = int(float(headers["x-ratelimit-remaining-requests"]))
-            if "x-ratelimit-remaining-tokens" in headers:
-                self.remaining_tokens = int(float(headers["x-ratelimit-remaining-tokens"]))
-            self.last_updated = datetime.now()
-        except (ValueError, TypeError):
-            pass
-
-    def can_optimize(self) -> bool:
-        if self.remaining_requests is None or self.remaining_tokens is None:
-            return True  # هنوز هیچ پاسخی نگرفتیم - خوش‌بینانه اجازه بده
-        return (self.remaining_requests > self.OPTIMIZER_MIN_REMAINING_REQUESTS and
-                self.remaining_tokens > self.OPTIMIZER_MIN_REMAINING_TOKENS)
-
-    def can_judge(self) -> bool:
-        if self.remaining_requests is None or self.remaining_tokens is None:
-            return True
-        return (self.remaining_requests > self.JUDGE_MIN_REMAINING_REQUESTS and
-                self.remaining_tokens > self.JUDGE_MIN_REMAINING_TOKENS)
-
 # ==================== هوش مصنوعی پیشرفته اختصاصی و ضد ضرر ====================
 class AIParameterOptimizer:
     def __init__(self, config):
@@ -387,16 +338,9 @@ class AIParameterOptimizer:
         self.MAX_RETRIES_429 = 2
         self.MAX_BACKOFF_SECONDS = 8
 
-        # نکته‌ی مهم بعد از بررسی سقف‌های واقعی Groq: مصرف این بات معمولاً حدود
-        # ۵۰۰-۷۰۰ توکن در هر فراخوانیه (پرامپت + پاسخ)، نه چند ده توکن. با سقف واقعی
-        # ۸٬۰۰۰ توکن/دقیقه، حتی ۲۵ درخواست در دقیقه (تنظیم قبلی) می‌تونست به ۱۵-۲۰
-        # هزار توکن در دقیقه برسه و زودتر از حد درخواست، به سقف توکن بخوره. عدد پایین‌تر
-        # اینجا بر همین اساس (نه فقط سقف تعداد درخواست) انتخاب شده.
-        self.GROQ_TARGET_RPM = 10
+        self.GROQ_TARGET_RPM = 25
         self.groq_min_interval_seconds = 60.0 / self.GROQ_TARGET_RPM
         self._last_groq_call_ts = 0.0
-        # ردیاب سهمیه‌ی رایگان - بعد از هر پاسخ Groq با هدرهای واقعی خودش به‌روز می‌شه
-        self.quota = GroqQuotaTracker()
 
         default_params = {
             "rsi_buy_min": 42,
@@ -440,14 +384,7 @@ class AIParameterOptimizer:
                 "consecutive_losses": 0,
                 "params": self.validate_and_clamp_params(merged_params)
             }
-        # محاسبه‌ی مصرف واقعی: هر فراخوانی تنظیم پارامتر حدود ۵۵۰-۷۵۰ توکن مصرف می‌کنه.
-        # با ۱۲ ارز، هر ۱ ساعت یک‌بار یعنی ۲۸۸ فراخوانی در روز × ~۷۰۰ توکن ≈ ۲۰۱٬۰۰۰
-        # توکن در روز - یعنی به‌تنهایی کل سهمیه‌ی روزانه‌ی ۲۰۰٬۰۰۰ توکنی Groq رو مصرف
-        # می‌کنه و چیزی برای لایه‌ی قضاوت معامله (که مهم‌تره) باقی نمی‌ذاره. با فاصله‌ی
-        # ۲ ساعت، مصرف این بخش به ~۱۰۰٬۰۰۰ توکن/روز (نصف سهمیه) می‌رسه و باقی برای
-        # قضاوت معامله + حاشیه‌ی امن می‌مونه. GroqQuotaTracker علاوه بر این، اگه مصرف
-        # واقعی از این تخمین بیشتر شد، خودش به‌صورت پویا این بخش رو محدودتر می‌کنه.
-        self.optimization_interval = timedelta(hours=2)
+        self.optimization_interval = timedelta(hours=1)
 
     def is_blacklisted(self, symbol: str, current_pctl: Optional[float] = None) -> bool:
         if symbol not in self.blacklist:
@@ -525,8 +462,6 @@ class AIParameterOptimizer:
             finally:
                 self._last_groq_call_ts = time.time()
 
-            self.quota.update_from_headers(response.headers)
-
             if response.status_code != 429:
                 return response
 
@@ -546,11 +481,6 @@ class AIParameterOptimizer:
         return response
 
     def should_optimize(self, symbol: str) -> bool:
-        if not self.quota.can_optimize():
-            logger.info(f"{symbol}: تنظیم پارامتر دوره‌ای به‌خاطر کمبود سهمیه‌ی Groq این چرخه رد شد "
-                        f"(باقیمانده: {self.quota.remaining_requests} درخواست / {self.quota.remaining_tokens} توکن) - "
-                        f"سهمیه برای لایه‌ی قضاوت معامله نگه داشته می‌شه.")
-            return False
         state = self.symbol_states[symbol]
         if state["last_optimized_time"] is None:
             return True
@@ -590,12 +520,12 @@ Never make changes so aggressive that they would effectively stop signals from b
 
         prompt = f"""
 You are an advanced quantitative trading AI. First, analyze the following key market data and indicators for asset {symbol}:
-{json.dumps(market_metrics)}
+{json.dumps(market_metrics, indent=2)}
 {side_perf_note}
 Based on these specific conditions, dynamically tune the trading parameters to adapt to the current market regime.
 Keep risk management strict to prevent losses, but allow reasonable flexibility so the bot can capture valid opportunities within safe logical boundaries.
 Return ONLY valid JSON with the exact same keys as these default parameters:
-{json.dumps(state["params"])}
+{json.dumps(state["params"], indent=2)}
 No markdown formatting, no extra text.
 """
 
@@ -607,10 +537,7 @@ No markdown formatting, no extra text.
         payload = {
             "model": "openai/gpt-oss-120b",
             "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.2,
-            # سقف طول پاسخ - پاسخ فقط همون ۱۴ پارامتر JSON قبلیه، ۳۰۰ توکن کاملاً کافیه.
-            # این سقف مستقیماً مصرف توکن هر فراخوانی رو قابل‌پیش‌بینی و محدود می‌کنه.
-            "max_tokens": 300
+            "temperature": 0.2
         }
 
         try:
@@ -638,9 +565,6 @@ No markdown formatting, no extra text.
         default = {"approve": True, "confidence": 50, "reason": "بدون دسترسی به AI - تایید صرفاً بر پایه امتیاز کمی"}
         if not self.groq_api_key:
             return default
-        if not self.quota.can_judge():
-            logger.warning(f"{symbol}: سهمیه‌ی رایگان Groq تقریباً تموم شده - لایه‌ی قضاوت رد شد و فقط بر پایه امتیاز کمی تایید می‌شه.")
-            return {"approve": True, "confidence": 50, "reason": "سهمیه‌ی رایگان Groq برای امروز تقریباً تموم شده - تایید صرفاً بر پایه امتیاز کمی"}
 
         prompt = f"""You are a veteran discretionary crypto trader with 15+ years of experience. You deeply understand that markets are not static: regimes shift, correlations break down, momentum exhausts, and no fixed rule set can fully capture that. You are reviewing a trade candidate that ALREADY passed a strict quantitative multi-factor scoring system (trend, RSI momentum, MACD, volume, market structure, multi-timeframe alignment, volatility regime).
 
@@ -649,7 +573,7 @@ Your only job now is the kind of contextual judgment an elite human trader adds 
 Trade candidate:
 Symbol: {symbol}
 Side: {side}
-Full context: {json.dumps(context, ensure_ascii=False)}
+Full context: {json.dumps(context, indent=2, ensure_ascii=False)}
 
 Respond ONLY with valid JSON, no markdown, no extra text, in exactly this shape:
 {{"approve": true or false, "confidence": integer 0-100, "reason": "one concise sentence in Persian explaining the judgment"}}
@@ -658,9 +582,7 @@ Respond ONLY with valid JSON, no markdown, no extra text, in exactly this shape:
         payload = {
             "model": "openai/gpt-oss-120b",
             "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.3,
-            # سقف طول پاسخ - فقط یه JSON کوچیک با یه جمله‌ی دلیل لازمه
-            "max_tokens": 200
+            "temperature": 0.3
         }
         try:
             response = self._post_with_retry(f"{self.groq_endpoint}v1/chat/completions", payload, headers, timeout=20, label=symbol)
