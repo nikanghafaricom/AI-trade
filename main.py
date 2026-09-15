@@ -402,6 +402,15 @@ class AIParameterOptimizer:
         self.on_quota_exhausted_callback: Optional[callable] = None
         self._judge_quota_alert_sent = False
 
+        # ---- تشخیص قطعی/برقراری اتصال شبکه‌ای به Groq (جدا از تمومشدن سهمیه) ----
+        # این بخش مخصوص حالتیه که خودِ درخواست به Groq اصلاً به پاسخ نمی‌رسه (قطعی
+        # اینترنت، DNS، timeout و مثل اون‌ها)، نه حالت 429/تمومشدن سهمیه که جدا از این
+        # با GroqQuotaTracker مدیریت می‌شه. بعد از چند شکست پیاپی یه هشدار به تلگرام
+        # می‌فرسته و وقتی دوباره یه پاسخ موفق بگیره، پیام «برقرار شد» رو می‌فرسته.
+        self.CONNECTION_FAILURE_ALERT_THRESHOLD = 3
+        self._consecutive_connection_failures = 0
+        self._connection_alert_sent = False
+
         default_params = {
             "rsi_buy_min": 42,
             "rsi_buy_max_range_start": 48,
@@ -521,14 +530,54 @@ class AIParameterOptimizer:
         if remaining > 0:
             time.sleep(remaining)
 
+    def _register_connection_result(self, success: bool, label: str):
+        """
+        ثبت نتیجه‌ی «اتصال شبکه‌ای» واقعی به Groq (نه وضعیت HTTP مثل 429). با هر پاسخ
+        موفق (حتی اگه بعداً به‌خاطر سهمیه یا خطای دیگه رد بشه) success=True حساب می‌شه؛
+        فقط وقتی خودِ درخواست اصلاً به پاسخ نمی‌رسه (Timeout/ConnectionError و مثل اون‌ها)
+        success=False می‌شه. بعد از چند شکست پیاپی هشدار «قطع اتصال» و به‌محض اولین
+        موفقیت بعد از اون، پیام «اتصال برقرار شد» به تلگرام فرستاده می‌شه.
+        """
+        if success:
+            self._consecutive_connection_failures = 0
+            if self._connection_alert_sent:
+                self._connection_alert_sent = False
+                if self.on_quota_exhausted_callback:
+                    try:
+                        self.on_quota_exhausted_callback(
+                            "✅ اتصال به هوش مصنوعی (Groq) دوباره برقرار شد - "
+                            "لایه‌ی قضاوت هوشمند معامله و تنظیم پارامتر دوره‌ای به حالت عادی برگشتن."
+                        )
+                    except Exception:
+                        pass
+        else:
+            self._consecutive_connection_failures += 1
+            if (self._consecutive_connection_failures >= self.CONNECTION_FAILURE_ALERT_THRESHOLD
+                    and not self._connection_alert_sent):
+                self._connection_alert_sent = True
+                if self.on_quota_exhausted_callback:
+                    try:
+                        self.on_quota_exhausted_callback(
+                            f"⚠️ اتصال به هوش مصنوعی (Groq) قطع شده (آخرین نماد: {label}).\n\n"
+                            "بات همچنان عادی کار می‌کنه و سیگنال می‌ده، ولی تا برقراری دوباره‌ی اتصال:\n"
+                            "• لایه‌ی قضاوت هوشمند معامله غیرفعاله (تایید فقط بر پایه‌ی امتیاز کمی)\n"
+                            "• تنظیم پارامتر دوره‌ای متوقفه (آخرین پارامترهای تنظیم‌شده توسط AI همچنان استفاده می‌شن)"
+                        )
+                    except Exception:
+                        pass
+
     def _post_with_retry(self, url: str, payload: dict, headers: dict, timeout: int, label: str) -> Optional[requests.Response]:
         for attempt in range(self.MAX_RETRIES_429 + 1):
             self._wait_for_groq_slot()
             try:
                 response = requests.post(url, json=payload, headers=headers, timeout=timeout)
+            except requests.exceptions.RequestException:
+                self._register_connection_result(False, label)
+                raise
             finally:
                 self._last_groq_call_ts = time.time()
 
+            self._register_connection_result(True, label)
             self.quota.update_from_headers(response.headers)
 
             if response.status_code != 429:
@@ -1484,7 +1533,8 @@ class HybridTradingSystem:
         self.journal = TradeJournal()
         self.paper_trader = PaperTrader(self.config, self.telegram, self.ai_optimizer, self.journal)
         self.correlation_manager = CorrelationManager(self.config, self.data)
-        # وقتی سهمیه‌ی Groq تموم/برگردونده بشه، از همون مسیر هشدار خطا به تلگرام خبر بده
+        # وقتی سهمیه‌ی Groq تموم/برگردونده بشه یا اتصال قطع/برقرار بشه، از همون مسیر
+        # هشدار خطا به تلگرام خبر بده
         self.ai_optimizer.on_quota_exhausted_callback = self._send_crash_alert
         self.running = True
         self.last_signal_time: Dict[str, datetime] = {}
@@ -1697,7 +1747,7 @@ class HybridTradingSystem:
 • فیلتر رژیم نوسان + تریلینگ استاپ واقعی
 • مانیتورینگ لحظه‌ای معاملات باز هر {self.config.TRADE_MONITOR_INTERVAL_SECONDS} ثانیه (مستقل از چرخه‌ی اصلی)
 • مدل‌سازی کارمزد و اسلیپیج تخمینی در محاسبه‌ی سود/زیان
-• هشدار خودکار تلگرامی در صورت خطای غیرمنتظره یا قطعی داده
+• هشدار خودکار تلگرامی در صورت خطای غیرمنتظره یا قطعی داده یا قطعی اتصال به AI
 • ژورنال معاملات و گزارش روزانه Win-rate/Expectancy
 • لایه‌ی قضاوت discretionary AI روی هر سیگنال (شبیه تریدر انسانی باتجربه، حداقل اطمینان {self.config.MIN_JUDGE_CONFIDENCE}%)
 • داده‌ی فرابازاری: شاخص ترس‌وطمع، رژیم کلان بیت‌کوین، فاندینگ ریت و اسپرد لحظه‌ای (best-effort)
