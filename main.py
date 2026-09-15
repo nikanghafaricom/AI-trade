@@ -1,39 +1,3 @@
-# ==============================================
-# Hybrid Signal Bot - نسخه جامع (V5 Ultimate Pro)
-# ==============================================
-import os
-import time
-import logging
-import requests
-import gc
-import json
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from datetime import datetime, timedelta
-from typing import Dict, Optional, List
-import pandas as pd
-import ccxt
-from openai import OpenAI
-from dotenv import load_dotenv
-
-load_dotenv()
-
-# ==================== وب‌سرور استاندارد ====================
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-type", "text/html; charset=utf-8")
-        self.end_headers()
-        self.wfile.write(b"Bot is alive and running!")
-
-    def do_HEAD(self):
-        self.send_response(200)
-        self.send_header("Content-type", "text/html; charset=utf-8")
-        self.end_headers()
-
-    def log_message(self, format, *args):
-        return
-
 def start_health_check_server():
     port = int(os.environ.get("PORT", 10000))
     try:
