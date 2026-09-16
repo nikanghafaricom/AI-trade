@@ -332,6 +332,16 @@ class GroqQuotaTracker:
     ۱٬۰۰۰ درخواست/روز، ۸٬۰۰۰ توکن/دقیقه، ۲۰۰٬۰۰۰ توکن/روز - این سقف‌ها برای
     کل سازمان مشترکه (نه هر تابع/کاربر جداگانه).
 
+    نکته‌ی مهم درباره‌ی هدرهای Groq: طبق خودِ مستندات رسمی‌شون،
+    x-ratelimit-remaining-requests همیشه به سقف روزانه (RPD=1000) اشاره داره،
+    ولی x-ratelimit-remaining-tokens همیشه به سقف هر-دقیقه (TPM=8000) اشاره
+    داره، نه به یه بودجه‌ی روزانه‌ی توکن. یعنی این عدد هر دقیقه خودش دوباره
+    شارژ می‌شه و مقایسه‌ش با آستانه‌های بزرگ (نزدیک یا بالاتر از ۸۰۰۰) عملاً
+    همیشه false می‌شه. به همین خاطر آستانه‌های توکن پایین‌تر از سقف واقعی
+    TPM=8000 نگه داشته می‌شن - نه به‌عنوان یه بودجه‌ی روزانه، بلکه صرفاً برای
+    اینکه اگه توی همون دقیقه‌ی جاری فشار زیادی روی TPM هست، تنظیم پارامتر
+    (که اهمیت کمتری داره) عقب بکشه و جا برای لایه‌ی قضاوت باز بمونه.
+
     به‌جای شمارش دستی مصرف (که با ساعت ریست واقعی سرور Groq هماهنگ نیست)، از
     خودِ هدرهای x-ratelimit-remaining-* که Groq بعد از هر پاسخ برمی‌گردونه
     استفاده می‌کنیم - دقیق‌تره و خودش با ریست واقعی سهمیه هماهنگه.
@@ -347,9 +357,9 @@ class GroqQuotaTracker:
         self.remaining_tokens: Optional[int] = None
         self.last_updated: Optional[datetime] = None
         self.OPTIMIZER_MIN_REMAINING_REQUESTS = 60
-        self.OPTIMIZER_MIN_REMAINING_TOKENS = 15000
+        self.OPTIMIZER_MIN_REMAINING_TOKENS = 3000
         self.JUDGE_MIN_REMAINING_REQUESTS = 5
-        self.JUDGE_MIN_REMAINING_TOKENS = 1000
+        self.JUDGE_MIN_REMAINING_TOKENS = 800
 
     def update_from_headers(self, headers) -> None:
         try:
