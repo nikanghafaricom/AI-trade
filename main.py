@@ -918,31 +918,23 @@ class SignalEngine:
 
         structure = self.analysis.market_structure(df_15m)
 
+        # ---- فقط پوزیشن Long/BUY (اسپات): امتیاز فروش/شورت از مسیر تصمیم‌گیری حذف شد ----
         buy_score = self._score_buy(latest, prev, p) if trend_4h in ["BULLISH", "NEUTRAL"] else 0.0
-        sell_score = self._score_sell(latest, prev, p) if trend_4h in ["BEARISH", "NEUTRAL"] else 0.0
 
         if trend_4h == "BULLISH":
             buy_score += 1.0
-        elif trend_4h == "BEARISH":
-            sell_score += 1.0
 
         if structure == "BULLISH":
             buy_score += 1.5
-        elif structure == "BEARISH":
-            sell_score += 1.5
 
         if buy_score > 0 and self.analysis.is_mtf_aligned(df_1h, "BUY"):
             buy_score += 1.5
-        if sell_score > 0 and self.analysis.is_mtf_aligned(df_1h, "SELL"):
-            sell_score += 1.5
 
         if symbol != "BTC/USDT" and btc_trend_4h and btc_structure:
             if btc_trend_4h == "BEARISH" and btc_structure == "BEARISH":
                 buy_score -= 1.0
-                sell_score += 0.5
             elif btc_trend_4h == "BULLISH" and btc_structure == "BULLISH":
                 buy_score += 1.0
-                sell_score -= 0.5
 
         if fng is not None:
             if fng <= 20:
@@ -962,17 +954,10 @@ class SignalEngine:
                     buy_score += 0.3
                 elif btc_rsi > 75:
                     buy_score -= 0.3
-            elif btc_trend_4h == "BEARISH":
-                if 32 <= btc_rsi <= 50:
-                    sell_score += 0.3
-                elif btc_rsi < 25:
-                    sell_score -= 0.3
 
         if btc_aligned_now and btc_macd_hist is not None:
             if btc_trend_4h == "BULLISH" and btc_macd_hist > 0:
                 buy_score += 0.2
-            elif btc_trend_4h == "BEARISH" and btc_macd_hist < 0:
-                sell_score += 0.2
 
         btc_reference_trade = macro_context.get("btc_reference_trade")
         if symbol not in ("BTC/USDT", "PAXG/USDT") and btc_aligned_now and btc_reference_trade:
@@ -981,17 +966,8 @@ class SignalEngine:
             if ref_side == "BUY":
                 if ref_health > 0.4:
                     buy_score += 0.5
-                    sell_score -= 0.5
                 elif ref_health < -0.4:
                     buy_score -= 0.5
-                    sell_score += 0.5
-            elif ref_side == "SELL":
-                if ref_health > 0.4:
-                    sell_score += 0.5
-                    buy_score -= 0.5
-                elif ref_health < -0.4:
-                    sell_score -= 0.5
-                    buy_score += 0.5
 
         threshold = self.config.MIN_SIGNAL_SCORE
         vol_ratio = latest['volume'] / latest['vol_sma'] if latest['vol_sma'] else 0
@@ -1002,7 +978,7 @@ class SignalEngine:
             "macd_hist": round(float(latest['macd_hist']), 6) if not pd.isna(latest.get('macd_hist', float('nan'))) else None,
             "volume_vs_avg_ratio": round(float(vol_ratio), 2),
             "atr_percentile_100candles": round(pctl, 1),
-            "mtf_1h_aligned": self.analysis.is_mtf_aligned(df_1h, "BUY" if buy_score >= sell_score else "SELL"),
+            "mtf_1h_aligned": self.analysis.is_mtf_aligned(df_1h, "BUY"),
             "consecutive_losses_this_symbol": self.ai_optimizer.symbol_states[symbol]["consecutive_losses"],
             "fear_greed_index": fng,
             "btc_macro_trend_4h": btc_trend_4h,
@@ -1017,14 +993,10 @@ class SignalEngine:
         macro_log = (f"FNG={fng} BTC_trend={btc_trend_4h}/{btc_structure} BTC_RSI={diagnostics['btc_rsi']} "
                      f"BTC_MACD={diagnostics['btc_macd_hist']} funding={funding_rate} "
                      f"spread={diagnostics['spread_pct']} btc_ref={btc_reference_trade} aligned={btc_aligned_now}")
-        if buy_score >= threshold and buy_score > sell_score:
+        if buy_score >= threshold:
             diagnostics["quant_score"] = round(buy_score, 2)
             logger.info(f"{symbol}: امتیاز خرید {buy_score:.2f} (آستانه {threshold}) | ساختار: {structure} | {macro_log}")
             return "BUY", diagnostics
-        if sell_score >= threshold and sell_score > buy_score:
-            diagnostics["quant_score"] = round(sell_score, 2)
-            logger.info(f"{symbol}: امتیاز فروش {sell_score:.2f} (آستانه {threshold}) | ساختار: {structure} | {macro_log}")
-            return "SELL", diagnostics
 
         return None, {}
 
@@ -1111,9 +1083,9 @@ class RiskManager:
 
     def can_open_trade(self, symbol: str, active_trades: Dict, correlation_manager: Optional["CorrelationManager"] = None,
                         btc_volatility_pctl: Optional[float] = None) -> Tuple[bool, str]:
-        if len(active_trades) >= self.config.MAX_CONCURRENT_TRADES:
-            return False, "به سقف تعداد معاملات هم‌زمان رسیدیم"
-
+        # توجه: سقف تعداد کل معاملات هم‌زمان (MAX_CONCURRENT_TRADES) که شبیه‌ساز محدودیت
+        # واقعیِ حساب بود، طبق درخواست حذف شد. محدودیت اکسپوژر همبسته (ریسک واقعی، نه
+        # شبیه‌سازی مصنوعی) همچنان برقراره تا چند معامله‌ی هم‌بسته هم‌زمان باز نشه.
         if correlation_manager is not None:
             threshold = correlation_manager.get_dynamic_threshold(btc_volatility_pctl)
             corr_count = correlation_manager.correlated_count(symbol, active_trades, threshold)
@@ -1802,7 +1774,7 @@ class HybridTradingSystem:
 
 باگ ارسال پیام برطرف شد. امکانات جدید:
 • مدیریت سرمایه ریسک‌محور (ریسک {self.config.RISK_PER_TRADE_PCT}% در هر معامله)
-• محدودیت اکسپوژر همبسته داینامیک (ماتریس همبستگی، حداکثر {self.config.MAX_CORRELATED_TRADES} معامله‌ی هم‌بسته) + حداکثر {self.config.MAX_CONCURRENT_TRADES} معامله هم‌زمان
+• محدودیت اکسپوژر همبسته داینامیک (ماتریس همبستگی، حداکثر {self.config.MAX_CORRELATED_TRADES} معامله‌ی هم‌بسته)
 • کلید قطع ضرر روزانه در {self.config.MAX_DAILY_LOSS_PCT}%
 • تایید ساختار بازار + چندتایم‌فریمی (15m/1h/4h) با warmup کافی برای EMA200
 • فیلتر رژیم نوسان + تریلینگ استاپ واقعی
@@ -1812,6 +1784,7 @@ class HybridTradingSystem:
 • ژورنال معاملات و گزارش روزانه Win-rate/Expectancy
 • لایه‌ی قضاوت discretionary AI روی هر سیگنال (شبیه تریدر انسانی باتجربه، حداقل اطمینان {self.config.MIN_JUDGE_CONFIDENCE}%)
 • داده‌ی فرابازاری: شاخص ترس‌وطمع، رژیم کلان بیت‌کوین، فاندینگ ریت و اسپرد لحظه‌ای (best-effort)
+• تخصصی‌شده فقط برای پوزیشن Long/BUY در بازار اسپات - هیچ سیگنال یا معامله‌ی Short/SELL دیگه صادر نمی‌شه
 """
         self.telegram.send_system_status(start_message)
 
