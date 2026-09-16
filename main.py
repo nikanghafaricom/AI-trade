@@ -665,9 +665,14 @@ No markdown formatting, no extra text.
             "model": "openai/gpt-oss-120b",
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.2,
-            # سقف طول پاسخ - پاسخ فقط همون ۱۴ پارامتر JSON قبلیه، ۳۰۰ توکن کاملاً کافیه.
-            # این سقف مستقیماً مصرف توکن هر فراخوانی رو قابل‌پیش‌بینی و محدود می‌کنه.
-            "max_tokens": 300
+            # ریزنینگ سبک: مدل هنوز کمی فکر می‌کنه ولی توکن کمتری صرف reasoning داخلی
+            # می‌کنه، پس فضای بیشتری برای خودِ خروجی JSON باقی می‌مونه (رفع خطای
+            # Expecting value: line 1 column 1 که به‌خاطر خالی‌موندن content رخ می‌داد)
+            "reasoning_effort": "low",
+            # سقف طول پاسخ - از ۳۰۰ به ۶۰۰ افزایش یافت تا حتی با کمی توکن reasoning،
+            # جای کافی برای خروجی کامل ۱۴ پارامتر JSON بمونه. این عدد سقفه، نه مصرف
+            # تضمینی - با reasoning_effort=low مصرف واقعی معمولاً نزدیک قبل می‌مونه.
+            "max_tokens": 600
         }
 
         try:
@@ -678,6 +683,9 @@ No markdown formatting, no extra text.
 
                 if content.startswith("```"):
                     content = content.strip("`").replace("json\n", "").strip()
+
+                if not content:
+                    raise ValueError("Groq یه پاسخ خالی برگردوند (احتمالاً توکن‌های reasoning تمام سقف max_tokens رو مصرف کردن)")
 
                 raw_params = json.loads(content)
                 state["params"] = self.validate_and_clamp_params(raw_params)
@@ -768,8 +776,12 @@ Respond ONLY with valid JSON, no markdown, no extra text, in exactly this shape:
             "model": "openai/gpt-oss-120b",
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.3,
-            # سقف طول پاسخ - فقط یه JSON کوچیک با یه جمله‌ی دلیل لازمه
-            "max_tokens": 200
+            # ریزنینگ سبک: مصرف توکن reasoning داخلی رو کم می‌کنه تا خروجی JSON نهایی
+            # همیشه فضای کافی برای تولید کامل داشته باشه (رفع همون خطای پاسخ خالی)
+            "reasoning_effort": "low",
+            # سقف طول پاسخ - از ۲۰۰ به ۵۰۰ افزایش یافت؛ چون این لایه (تایید نهایی
+            # معامله) الزامیه، نباید به‌خاطر کمبود سقف توکن، بدون دلیل واقعی رد بشه
+            "max_tokens": 500
         }
         try:
             response = self._post_with_retry(f"{self.groq_endpoint}v1/chat/completions", payload, headers, timeout=20, label=symbol)
@@ -783,6 +795,8 @@ Respond ONLY with valid JSON, no markdown, no extra text, in exactly this shape:
             content = response.json()['choices'][0]['message']['content'].strip()
             if content.startswith("```"):
                 content = content.strip("`").replace("json\n", "").strip()
+            if not content:
+                raise ValueError("Groq یه پاسخ خالی برگردوند (احتمالاً توکن‌های reasoning تمام سقف max_tokens رو مصرف کردن)")
             result = json.loads(content)
             self._reset_judge_error_alert()
             return {
