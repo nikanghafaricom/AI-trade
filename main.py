@@ -918,8 +918,17 @@ class SignalEngine:
 
         structure = self.analysis.market_structure(df_15m)
 
-        # ---- فقط پوزیشن Long/BUY (اسپات): امتیاز فروش/شورت از مسیر تصمیم‌گیری حذف شد ----
-        buy_score = self._score_buy(latest, prev, p) if trend_4h in ["BULLISH", "NEUTRAL"] else 0.0
+        # ---- فقط پوزیشن Long/BUY (اسپات) ----
+        # تغییر کلیدی برای کاهش استاپ‌های الکی:
+        # لانگ فقط در رژیم BULLISH یا در NEUTRAL + ساختار صعودی مجاز است.
+        # این کار باعث می‌شود ربات در بازارهای خنثی/نزولی بی‌دلیل لانگ نزند
+        # و بعد از آپدیت پارامترها، با تغییر جو بازار دوباره ضرر ندهد.
+        if trend_4h == "BULLISH":
+            buy_score = self._score_buy(latest, prev, p)
+        elif trend_4h == "NEUTRAL" and structure == "BULLISH":
+            buy_score = self._score_buy(latest, prev, p) * 0.85  # کمی سخت‌گیرانه‌تر در رژیم خنثی
+        else:
+            buy_score = 0.0
 
         if trend_4h == "BULLISH":
             buy_score += 1.0
@@ -1785,6 +1794,7 @@ class HybridTradingSystem:
 • لایه‌ی قضاوت discretionary AI روی هر سیگنال (شبیه تریدر انسانی باتجربه، حداقل اطمینان {self.config.MIN_JUDGE_CONFIDENCE}%)
 • داده‌ی فرابازاری: شاخص ترس‌وطمع، رژیم کلان بیت‌کوین، فاندینگ ریت و اسپرد لحظه‌ای (best-effort)
 • تخصصی‌شده فقط برای پوزیشن Long/BUY در بازار اسپات - هیچ سیگنال یا معامله‌ی Short/SELL دیگه صادر نمی‌شه
+• **فیلتر رژیم بازار تقویت‌شده**: لانگ فقط در BULLISH یا NEUTRAL+ساختار صعودی (کاهش استاپ‌های الکی)
 """
         self.telegram.send_system_status(start_message)
 
