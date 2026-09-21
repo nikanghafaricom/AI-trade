@@ -481,6 +481,17 @@ class AIParameterOptimizer:
         # بیشتر شد، خودش به‌صورت پویا این بخش رو محدودتر می‌کنه.
         self.optimization_interval = timedelta(hours=3)
 
+        # جلوگیری از موج استارت: وقتی ربات تازه بالا می‌آید، همه‌ی نمادها last_optimized=None
+        # دارند و پشت‌سرهم به Groq حمله می‌کنند → ۴۲۹. حداکثر ۲ بهینه‌سازی در هر چرخه‌ی
+        # ۵ دقیقه‌ای؛ بقیه در چرخه‌های بعدی انجام می‌شوند. کیفیت افت نمی‌کند چون
+        # پارامترهای پیش‌فرض/قبلی همچنان معتبرند و لایه‌ی قضاوت اولویت دارد.
+        self.MAX_OPTIMIZATIONS_PER_CYCLE = 2
+        self._optimizations_this_cycle = 0
+        # بعد از چند ۴۲۹ پیاپی برای یک نماد، موقتاً بهینه‌سازی‌اش را عقب می‌اندازیم
+        # تا سهمیه برای قضاوت آزاد بماند.
+        self._optimize_cooldown_until: Dict[str, datetime] = {}
+        self.OPTIMIZE_429_COOLDOWN_MINUTES = 25
+
     def is_blacklisted(self, symbol: str, current_pctl: Optional[float] = None) -> bool:
         if symbol not in self.blacklist:
             return False
@@ -619,11 +630,22 @@ class AIParameterOptimizer:
 
         return response
 
+    def reset_cycle_optimize_budget(self):
+        """در ابتدای هر چرخه‌ی اصلی صدا زده می‌شود تا بودجه‌ی بهینه‌سازی ریست شود."""
+        self._optimizations_this_cycle = 0
+
     def should_optimize(self, symbol: str) -> bool:
         if not self.quota.can_optimize():
             logger.info(f"{symbol}: تنظیم پارامتر دوره‌ای به‌خاطر کمبود سهمیه‌ی Groq این چرخه رد شد "
                         f"(باقیمانده: {self.quota.remaining_requests} درخواست / {self.quota.remaining_tokens} توکن) - "
                         f"سهمیه برای لایه‌ی قضاوت معامله نگه داشته می‌شه.")
+            return False
+        # سقف تعداد بهینه‌سازی در هر چرخه (جلوگیری از موج استارت و ۴۲۹ پشت‌سرهم)
+        if self._optimizations_this_cycle >= self.MAX_OPTIMIZATIONS_PER_CYCLE:
+            return False
+        # کول‌داون موقت بعد از ۴۲۹های پیاپی
+        cooldown_until = self._optimize_cooldown_until.get(symbol)
+        if cooldown_until is not None and datetime.now() < cooldown_until:
             return False
         state = self.symbol_states[symbol]
         if state["last_optimized_time"] is None:
@@ -700,6 +722,8 @@ No markdown formatting, no extra text.
         }
 
         try:
+            # این فراخوانی از بودجه‌ی چرخه مصرف می‌کند (حتی اگر بعداً ۴۲۹ بخورد)
+            self._optimizations_this_cycle += 1
             response = self._post_with_retry(f"{self.groq_endpoint}v1/chat/completions", payload, headers, timeout=25, label=symbol)
             if response.status_code == 200:
                 res_data = response.json()
@@ -714,9 +738,14 @@ No markdown formatting, no extra text.
                 raw_params = json.loads(content)
                 state["params"] = self.validate_and_clamp_params(raw_params)
                 state["last_optimized_time"] = datetime.now()
+                # موفقیت → کول‌داون ۴۲۹ قبلی را پاک کن
+                self._optimize_cooldown_until.pop(symbol, None)
                 logger.info(f"پارامترهای ضد ضرر و پویای {symbol} بر اساس داده‌های روز بروزرسانی شد.")
             else:
                 logger.warning(f"Groq API برای {symbol} پاسخ {response.status_code} داد؛ پارامترهای قبلی حفظ شدن.")
+                if response.status_code == 429:
+                    self._optimize_cooldown_until[symbol] = datetime.now() + timedelta(minutes=self.OPTIMIZE_429_COOLDOWN_MINUTES)
+                    logger.info(f"{symbol}: بهینه‌سازی به‌خاطر ۴۲۹ برای {self.OPTIMIZE_429_COOLDOWN_MINUTES} دقیقه عقب افتاد تا سهمیه برای لایه‌ی قضاوت آزاد بماند.")
         except Exception as e:
             logger.error(f"خطا در بهینه‌سازی هوش مصنوعی برای {symbol}: {e}")
 
@@ -1752,6 +1781,8 @@ class HybridTradingSystem:
     def run_once(self):
         logger.info("----- شروع آنالیز ایمن و ضد ضرر بازار -----")
         self._check_daily_rollover()
+        # ریست بودجه‌ی بهینه‌سازی این چرخه (حداکثر ۲ نماد در هر ۵ دقیقه)
+        self.ai_optimizer.reset_cycle_optimize_budget()
 
         if self.correlation_manager.should_refresh():
             self.correlation_manager.refresh()
