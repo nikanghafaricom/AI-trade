@@ -10,7 +10,6 @@ import requests
 import gc
 import json
 import threading
-import random
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timedelta, date as date_cls
 from typing import Dict, Optional, List, Tuple
@@ -351,21 +350,15 @@ class GroqQuotaTracker:
     ادامه می‌ده). تنظیم پارامتر دوره‌ای (optimize_symbol_parameters) صرفاً
     بهینه‌سازیه، پس با آستانه‌ی محافظه‌کارتر زودتر متوقف می‌شه تا سهمیه برای
     لایه‌ی قضاوت باقی بمونه.
-
-    به‌روزرسانی سپتامبر ۲۰۲۶: آستانه‌ها کمی محافظه‌کارتر شدن تا با مصرف واقعی
-    ~۶۰۰-۷۵۰ توکن در هر فراخوانی، کمتر به TPM=۸۰۰۰ و RPD=۱۰۰۰ برخورد کنیم
-    بدون اینکه کیفیت لایه‌ی قضاوت (که مهم‌تره) آسیب ببینه.
     """
     def __init__(self):
         self.remaining_requests: Optional[int] = None
         self.remaining_tokens: Optional[int] = None
         self.last_updated: Optional[datetime] = None
-        # محافظه‌کارتر: تنظیم پارامتر زودتر متوقف می‌شه تا جا برای قضاوت باز بمونه
-        self.OPTIMIZER_MIN_REMAINING_REQUESTS = 80
-        self.OPTIMIZER_MIN_REMAINING_TOKENS = 3500
-        # قضاوت تا نزدیک آخرین لحظه ادامه می‌ده (کیفیت ربات حفظ می‌شه)
-        self.JUDGE_MIN_REMAINING_REQUESTS = 8
-        self.JUDGE_MIN_REMAINING_TOKENS = 1000
+        self.OPTIMIZER_MIN_REMAINING_REQUESTS = 60
+        self.OPTIMIZER_MIN_REMAINING_TOKENS = 3000
+        self.JUDGE_MIN_REMAINING_REQUESTS = 5
+        self.JUDGE_MIN_REMAINING_TOKENS = 800
 
     def update_from_headers(self, headers) -> None:
         try:
@@ -400,15 +393,15 @@ class AIParameterOptimizer:
         self.BLACKLIST_MIN_COOLDOWN_MINUTES = 20
         self.BLACKLIST_EARLY_RELEASE_PCTL = 70
 
-        self.MAX_RETRIES_429 = 4
-        self.MAX_BACKOFF_SECONDS = 45
+        self.MAX_RETRIES_429 = 2
+        self.MAX_BACKOFF_SECONDS = 8
 
         # نکته‌ی مهم بعد از بررسی سقف‌های واقعی Groq: مصرف این بات معمولاً حدود
-        # ۶۰۰-۷۵۰ توکن در هر فراخوانیه (پرامپت + پاسخ). با سقف واقعی ۸٬۰۰۰ توکن/دقیقه
-        # و ۳۰ RPM، هدف امن حدود ۸ درخواست در دقیقه انتخاب شده تا هم RPM و هم TPM
-        # با حاشیه امن رعایت بشه و ۴۲۹ کمتر رخ بده. فاصله‌ی حداقل بین فراخوانی‌ها
-        # بر همین اساس محاسبه می‌شه.
-        self.GROQ_TARGET_RPM = 8
+        # ۵۰۰-۷۰۰ توکن در هر فراخوانیه (پرامپت + پاسخ)، نه چند ده توکن. با سقف واقعی
+        # ۸٬۰۰۰ توکن/دقیقه، حتی ۲۵ درخواست در دقیقه (تنظیم قبلی) می‌تونست به ۱۵-۲۰
+        # هزار توکن در دقیقه برسه و زودتر از حد درخواست، به سقف توکن بخوره. عدد پایین‌تر
+        # اینجا بر همین اساس (نه فقط سقف تعداد درخواست) انتخاب شده.
+        self.GROQ_TARGET_RPM = 10
         self.groq_min_interval_seconds = 60.0 / self.GROQ_TARGET_RPM
         self._last_groq_call_ts = 0.0
         # ردیاب سهمیه‌ی رایگان - بعد از هر پاسخ Groq با هدرهای واقعی خودش به‌روز می‌شه
@@ -473,13 +466,14 @@ class AIParameterOptimizer:
                 "consecutive_losses": 0,
                 "params": self.validate_and_clamp_params(merged_params)
             }
-        # محاسبه‌ی مصرف واقعی: هر فراخوانی تنظیم پارامتر حدود ۶۰۰-۷۵۰ توکن مصرف می‌کنه.
-        # با ۱۲ ارز و فاصله‌ی ۳ ساعته: ۸ فراخوانی در روز × ~۷۰۰ توکن ≈ ۵۶٬۰۰۰ توکن/روز
-        # برای بهینه‌سازی. این حدود ۲۸٪ از سهمیه‌ی ۲۰۰٬۰۰۰ توکنی روزانه‌ست و فضای
-        # کافی برای لایه‌ی قضاوت معامله (که کیفیت ربات بهش وابسته است) + حاشیه امن
-        # باقی می‌ذاره. GroqQuotaTracker علاوه بر این، اگه مصرف واقعی از این تخمین
-        # بیشتر شد، خودش به‌صورت پویا این بخش رو محدودتر می‌کنه.
-        self.optimization_interval = timedelta(hours=3)
+        # محاسبه‌ی مصرف واقعی: هر فراخوانی تنظیم پارامتر حدود ۵۵۰-۷۵۰ توکن مصرف می‌کنه.
+        # با ۱۲ ارز، هر ۱ ساعت یک‌بار یعنی ۲۸۸ فراخوانی در روز × ~۷۰۰ توکن ≈ ۲۰۱٬۰۰۰
+        # توکن در روز - یعنی به‌تنهایی کل سهمیه‌ی روزانه‌ی ۲۰۰٬۰۰۰ توکنی Groq رو مصرف
+        # می‌کنه و چیزی برای لایه‌ی قضاوت معامله (که مهم‌تره) باقی نمی‌ذاره. با فاصله‌ی
+        # ۲ ساعت، مصرف این بخش به ~۱۰۰٬۰۰۰ توکن/روز (نصف سهمیه) می‌رسه و باقی برای
+        # قضاوت معامله + حاشیه‌ی امن می‌مونه. GroqQuotaTracker علاوه بر این، اگه مصرف
+        # واقعی از این تخمین بیشتر شد، خودش به‌صورت پویا این بخش رو محدودتر می‌کنه.
+        self.optimization_interval = timedelta(hours=2)
 
     def is_blacklisted(self, symbol: str, current_pctl: Optional[float] = None) -> bool:
         if symbol not in self.blacklist:
@@ -605,14 +599,12 @@ class AIParameterOptimizer:
             if attempt >= self.MAX_RETRIES_429:
                 return response
 
-            # اولویت با هدر رسمی Retry-After؛ در غیر این صورت exponential backoff + jitter
             retry_after = response.headers.get("Retry-After") or response.headers.get("retry-after")
             try:
-                wait_seconds = float(retry_after) if retry_after is not None else (2 ** attempt) + 1
-            except (ValueError, TypeError):
-                wait_seconds = (2 ** attempt) + 1
-            # jitter کوچک برای جلوگیری از thundering herd
-            wait_seconds = min(wait_seconds + random.uniform(0.3, 1.5), self.MAX_BACKOFF_SECONDS)
+                wait_seconds = float(retry_after) if retry_after is not None else 2 * (attempt + 1)
+            except ValueError:
+                wait_seconds = 2 * (attempt + 1)
+            wait_seconds = min(wait_seconds, self.MAX_BACKOFF_SECONDS)
 
             logger.warning(f"Groq API برای {label} پاسخ 429 داد؛ {wait_seconds:.1f} ثانیه صبر و تلاش مجدد ({attempt + 1}/{self.MAX_RETRIES_429})...")
             time.sleep(wait_seconds)
