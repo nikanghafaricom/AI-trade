@@ -143,7 +143,14 @@ class Config:
     # خودِ Groq، x-ratelimit-remaining-tokens همیشه سقف هر-دقیقه (TPM) رو نشون می‌ده،
     # نه یک بودجه‌ی روزانه‌ی واقعی. این بخش خودش مصرف واقعی توکن رو در طول روز جمع
     # می‌زنه و طبق اولویت بین سه مصرف‌کننده (قضاوت معامله/رژیم کلی بازار/تنظیم پارامتر)
-    # تقسیم می‌کنه تا  = float(os.getenv("GROQ_OPTIMIZER_MAX_INTERVAL_HOURS", 4.0))
+    # تقسیم می‌کنه تا نه سهمیه ته بکشه، نه کیفیت مهم‌ترین لایه (قضاوت معامله) افت کنه.
+    GROQ_DAILY_TOKEN_CAP = int(os.getenv("GROQ_DAILY_TOKEN_CAP", 200000))
+    GROQ_DAILY_REQUEST_CAP = int(os.getenv("GROQ_DAILY_REQUEST_CAP", 1000))
+    GROQ_JUDGE_RESERVED_SHARE = float(os.getenv("GROQ_JUDGE_RESERVED_SHARE", 0.70))
+    GROQ_REGIME_RESERVED_SHARE = float(os.getenv("GROQ_REGIME_RESERVED_SHARE", 0.03))
+    GROQ_BUDGET_HARD_STOP_FRACTION = float(os.getenv("GROQ_BUDGET_HARD_STOP_FRACTION", 0.95))
+    GROQ_OPTIMIZER_MIN_INTERVAL_HOURS = float(os.getenv("GROQ_OPTIMIZER_MIN_INTERVAL_HOURS", 1.0))
+    GROQ_OPTIMIZER_MAX_INTERVAL_HOURS = float(os.getenv("GROQ_OPTIMIZER_MAX_INTERVAL_HOURS", 4.0))
 
     def validate(self):
         required = {
