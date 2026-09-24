@@ -2052,4 +2052,38 @@ class HybridTradingSystem:
 
 🆕 **جدید - خودتنظیمی با جوی بازار:**
 • لایه‌ی سراسری پرتفوی (محاسباتی، بدون هزینه‌ی AI): بر اساس {self.config.PORTFOLIO_ROLLING_WINDOW} رخداد اخیر و {self.config.PORTFOLIO_CONSECUTIVE_LOSS_THRESHOLD} ضرر متوالی سراسری، خودکار بین حالت‌های 🟢عادی/🟡محتاط/🔴تدافعی جابه‌جا می‌شه
-• در حالت تدافعی: آستانه‌ی ورود و حداقل اطمینان AI بالاتر می‌ره، حجم پوزیشن کم می‌شه، کول‌داون بیشتر می‌شه و فق
+• در حالت تدافعی: آستانه‌ی ورود و حداقل اطمینان AI بالاتر می‌ره، حجم پوزیشن کم می‌شه، کول‌داون بیشتر می‌شه و فقط روند خالص صعودی مجازه
+• ارزیابی سراسری و کم‌تکرار AI از رژیم کلی بازار (هر {self.config.MARKET_REGIME_AI_INTERVAL_HOURS} ساعت، مصرف Groq ناچیز) که یک ضریب حجم اضافه اعمال می‌کنه
+• هر تغییر حالت پرتفوی با یک پیام توضیحی به تلگرام اطلاع داده می‌شه - نیازی به پیگیری دستی نیست
+
+🆕 **جدید - بودجه‌بند هوشمند سهمیه‌ی رایگان Groq:**
+• سقف واقعی روزانه (۲۰۰هزار توکن) بین سه مصرف‌کننده اولویت‌بندی شده: قضاوت هر معامله (اولویت اول، عملاً همیشه در دسترس)، رژیم کلی بازار (سهم ثابت کوچک) و تنظیم پارامتر نمادها (باقیمانده، با فرکانس پویا بین {self.config.GROQ_OPTIMIZER_MIN_INTERVAL_HOURS:g} تا {self.config.GROQ_OPTIMIZER_MAX_INTERVAL_HOURS:g} ساعت بسته به سرعت مصرف)
+• هدف: کیفیت قضاوت معامله هیچ‌وقت به‌خاطر کمبود سهمیه افت نکنه، و در عین حال سهمیه‌ی روزانه هیچ‌وقت واقعاً تموم نشه
+• وضعیت مصرف روزانه در گزارش روزانه تلگرام هم نمایش داده می‌شه
+"""
+        self.telegram.send_system_status(start_message)
+
+        self._start_trade_monitor_thread()
+
+        while self.running:
+            try:
+                self.run_once()
+            except Exception as e:
+                logger.error(f"خطای پیش‌بینی‌نشده در چرخه‌ی اصلی: {e}")
+                self._send_crash_alert(
+                    f"خطای پیش‌بینی‌نشده در چرخه‌ی اصلی ربات:\n`{e}`\n\n"
+                    "ربات همچنان روشنه و چرخه‌ی بعدی رو امتحان می‌کنه."
+                )
+            gc.collect()
+            time.sleep(self.config.CHECK_INTERVAL)
+
+    def stop(self):
+        self.running = False
+        logger.info("بات متوقف شد")
+
+if __name__ == "__main__":
+    bot = HybridTradingSystem()
+    try:
+        bot.start()
+    except KeyboardInterrupt:
+        bot.stop()
