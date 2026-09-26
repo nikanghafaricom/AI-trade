@@ -174,6 +174,14 @@ class Config:
     JUDGE_FALLBACK_SCORE_MARGIN = float(os.getenv("JUDGE_FALLBACK_SCORE_MARGIN", 1.5))
     JUDGE_FALLBACK_CONFIDENCE = int(os.getenv("JUDGE_FALLBACK_CONFIDENCE", 60))
 
+    # ==================== جدید: تشخیص افتِ مومنتوم بیت‌کوین قبل از برگشتِ فیلتر روند ====================
+    # از لاگ واقعی: BTC_MACD در عرض ~۲ ساعت از 11.9 به 7.8- افتاد اما چون trend_4h
+    # (میانگین‌های بلندمدت‌تر) هنوز BULLISH بود، چند خرید دقیقاً وسط این افت رد شدن.
+    # این آستانه‌ها روی همون مقیاسی تنظیم شدن که تو دیتای واقعی دیدیم.
+    BTC_MOMENTUM_DECEL_MILD = float(os.getenv("BTC_MOMENTUM_DECEL_MILD", -2.0))
+    BTC_MOMENTUM_DECEL_SEVERE = float(os.getenv("BTC_MOMENTUM_DECEL_SEVERE", -5.0))
+    BTC_RSI_EXHAUSTION_LEVEL = float(os.getenv("BTC_RSI_EXHAUSTION_LEVEL", 72.0))
+
     def validate(self):
         required = {
             "TELEGRAM_BOT_TOKEN": self.TELEGRAM_BOT_TOKEN,
@@ -1380,6 +1388,20 @@ class SignalEngine:
             if btc_trend_4h == "BULLISH" and btc_macd_hist > 0:
                 buy_score += 0.2
 
+        # جدید: افت مومنتوم بیت‌کوین رو زودتر از فیلتر روندِ کندروتر جریمه می‌کنه.
+        btc_macd_slope = macro_context.get("btc_macd_slope")
+        momentum_penalty = 0.0
+        if symbol != "BTC/USDT" and btc_trend_4h == "BULLISH" and btc_macd_slope is not None:
+            if btc_macd_slope <= self.config.BTC_MOMENTUM_DECEL_SEVERE:
+                momentum_penalty = 2.0
+            elif btc_macd_slope <= self.config.BTC_MOMENTUM_DECEL_MILD:
+                momentum_penalty = 1.0
+            # وقتی هم اشباع خرید (RSI بالا) و هم افت مومنتوم با هم باشن، دقیقاً همون
+            # الگوی برگشتیه که تو معاملات ضررده‌ی امروز دیده شد - جریمه‌ی اضافه می‌گیره
+            if momentum_penalty > 0 and btc_rsi is not None and btc_rsi >= self.config.BTC_RSI_EXHAUSTION_LEVEL:
+                momentum_penalty += 1.0
+        buy_score -= momentum_penalty
+
         btc_reference_trade = macro_context.get("btc_reference_trade")
         if symbol not in ("BTC/USDT", "PAXG/USDT") and btc_aligned_now and btc_reference_trade:
             ref_side = btc_reference_trade.get("side")
@@ -1412,12 +1434,15 @@ class SignalEngine:
             "btc_aligned_now": btc_aligned_now,
             "btc_rsi": round(btc_rsi, 1) if btc_rsi is not None else None,
             "btc_macd_hist": round(btc_macd_hist, 6) if btc_macd_hist is not None else None,
+            "btc_macd_slope": btc_macd_slope,
+            "btc_momentum_penalty_applied": momentum_penalty,
             "portfolio_state": portfolio_adjustments.get("state"),
             "portfolio_ai_market_regime": portfolio_adjustments.get("ai_market_regime"),
             "signal_threshold_used": round(threshold, 2),
         }
         macro_log = (f"FNG={fng} BTC_trend={btc_trend_4h}/{btc_structure} BTC_RSI={diagnostics['btc_rsi']} "
-                     f"BTC_MACD={diagnostics['btc_macd_hist']} funding={funding_rate} "
+                     f"BTC_MACD={diagnostics['btc_macd_hist']} BTC_MACD_slope={btc_macd_slope} "
+                     f"funding={funding_rate} "
                      f"spread={diagnostics['spread_pct']} btc_ref={btc_reference_trade} aligned={btc_aligned_now} "
                      f"portfolio_state={diagnostics['portfolio_state']}")
         if buy_score >= threshold:
@@ -2053,6 +2078,15 @@ class HybridTradingSystem:
                     context["btc_rsi"] = float(btc_latest['rsi'])
                 if not pd.isna(btc_latest.get('macd_hist', float('nan'))):
                     context["btc_macd_hist"] = float(btc_latest['macd_hist'])
+                # جدید: شیب مومنتوم بیت‌کوین (نه فقط مثبت/منفی بودن لحظه‌ای اون)
+                # علتش لاگ واقعی امروزه: BTC_MACD از 11.9 به -7.8 در چند ساعت افت کرد
+                # درحالی‌که trend_4h (فیلتر کندرو) هنوز BULLISH نشون می‌داد و همین باعث
+                # شد چند سیگنال دقیقاً وسط شروعِ برگشت بازار صادر بشه. این شیب، افتِ
+                # مومنتوم رو زودتر از فیلتر کندروی 4 ساعته می‌بینه.
+                if len(btc_df_15m) > 6 and not pd.isna(btc_latest.get('macd_hist', float('nan'))):
+                    ref = btc_df_15m.iloc[-7]
+                    if not pd.isna(ref.get('macd_hist', float('nan'))):
+                        context["btc_macd_slope"] = round(float(btc_latest['macd_hist']) - float(ref['macd_hist']), 6)
         except Exception as e:
             logger.warning(f"خطا در ساخت زمینه‌ی کلان بیت‌کوین: {e}")
 
