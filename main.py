@@ -152,6 +152,28 @@ class Config:
     GROQ_OPTIMIZER_MIN_INTERVAL_HOURS = float(os.getenv("GROQ_OPTIMIZER_MIN_INTERVAL_HOURS", 1.0))
     GROQ_OPTIMIZER_MAX_INTERVAL_HOURS = float(os.getenv("GROQ_OPTIMIZER_MAX_INTERVAL_HOURS", 4.0))
 
+    # ==================== جدید: پایداری پارامترهای AI بین دیپلوی‌ها + اعتبارسنجی نتیجه ====================
+    # مشکل قبلی: هر دیپلوی/ری‌استارت جدید symbol_states رو به پیش‌فرض‌های هاردکد برمی‌گردوند
+    # و چون last_optimized_time=None بود، در همون چرخه‌ی اول (با صفر معامله‌ی واقعی) همه‌ی
+    # ۱۲ نماد بلافاصله توسط AI بازتنظیم می‌شدن - دقیقاً همون لحظه‌ای که پارامترهای پیش‌فرض
+    # (که سود روز اول رو می‌سازن) با یک حدس تک‌مرحله‌ای AI جایگزین می‌شدن. این بخش پارامترها
+    # رو روی دیسک نگه می‌داره (مثل trade_history.json) تا دیپلوی کد باعث ریست آماری نشه، و
+    # هر تغییر پارامتر رو با نتیجه‌ی واقعی معاملات بعدی می‌سنجه و اگه بدتر شد خودکار برمی‌گردونه.
+    AI_STATE_FILE = os.getenv("AI_STATE_FILE", "ai_symbol_state.json")
+    AI_VALIDATION_MIN_TRADES = int(os.getenv("AI_VALIDATION_MIN_TRADES", 3))
+    AI_VALIDATION_AVG_R_TOLERANCE = float(os.getenv("AI_VALIDATION_AVG_R_TOLERANCE", 0.15))
+    AI_VALIDATION_FLOOR_AVG_R = float(os.getenv("AI_VALIDATION_FLOOR_AVG_R", -0.5))
+    AI_VALIDATION_FLOOR_WIN_RATE = float(os.getenv("AI_VALIDATION_FLOOR_WIN_RATE", 35.0))
+
+    # ==================== جدید: فال‌بک محاسباتیِ لایه‌ی قضاوت وقتی Groq در دسترس نیست ====================
+    # مشکل قبلی: هر بار Groq (به هر دلیلی - تمومی سهمیه، خطای موقت، کندی) جواب نده، سیستم
+    # به‌صورت کامل و بدون استثنا همه‌ی سیگنال‌ها رو رد می‌کرد؛ یعنی «سیگنال کم» گاهی به‌خاطر
+    # ضعف بازار نبود بلکه به‌خاطر قطعی موقت AI بود. این فال‌بک فقط وقتی AI واقعاً در دسترس
+    # نیست فعال می‌شه و کیفیت رو پایین نمی‌آره چون آستانه‌ش از آستانه‌ی عادی سخت‌گیرتره
+    # (فقط سیگنال‌های خیلی قوی‌تر از حد معمول، بدون تایید AI، عبور می‌کنن).
+    JUDGE_FALLBACK_SCORE_MARGIN = float(os.getenv("JUDGE_FALLBACK_SCORE_MARGIN", 1.5))
+    JUDGE_FALLBACK_CONFIDENCE = int(os.getenv("JUDGE_FALLBACK_CONFIDENCE", 60))
+
     def validate(self):
         required = {
             "TELEGRAM_BOT_TOKEN": self.TELEGRAM_BOT_TOKEN,
@@ -580,9 +602,51 @@ class AIParameterOptimizer:
             self.symbol_states[sym] = {
                 "last_optimized_time": None,
                 "consecutive_losses": 0,
-                "params": self.validate_and_clamp_params(merged_params)
+                "params": self.validate_and_clamp_params(merged_params),
+                "pending_validation": None
             }
         self.optimization_interval = timedelta(hours=2)
+        self._load_persisted_state()
+
+    # ---- پایداری پارامترها روی دیسک (بین دیپلوی/ری‌استارت) ----
+    def _load_persisted_state(self):
+        path = self.config.AI_STATE_FILE
+        if not os.path.exists(path):
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                saved = json.load(f)
+            for sym, saved_state in (saved or {}).items():
+                if sym not in self.symbol_states:
+                    continue
+                state = self.symbol_states[sym]
+                if saved_state.get("params"):
+                    state["params"] = self.validate_and_clamp_params(saved_state["params"])
+                if saved_state.get("last_optimized_time"):
+                    try:
+                        state["last_optimized_time"] = datetime.fromisoformat(saved_state["last_optimized_time"])
+                    except Exception:
+                        pass
+                state["consecutive_losses"] = int(saved_state.get("consecutive_losses", 0))
+                state["pending_validation"] = saved_state.get("pending_validation")
+            logger.info(f"وضعیت پارامترهای AI از دیپلوی قبلی بازیابی شد ({path}) - دیگه نیازی به بازتنظیم کور از صفر نیست.")
+        except Exception as e:
+            logger.error(f"خطا در بازیابی وضعیت پارامترهای AI: {e} - از پیش‌فرض‌ها استفاده می‌شه.")
+
+    def _save_persisted_state(self):
+        try:
+            serializable = {}
+            for sym, state in self.symbol_states.items():
+                serializable[sym] = {
+                    "params": state["params"],
+                    "last_optimized_time": state["last_optimized_time"].isoformat() if state["last_optimized_time"] else None,
+                    "consecutive_losses": state["consecutive_losses"],
+                    "pending_validation": state.get("pending_validation")
+                }
+            with open(self.config.AI_STATE_FILE, "w", encoding="utf-8") as f:
+                json.dump(serializable, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"خطا در ذخیره‌ی وضعیت پارامترهای AI: {e}")
 
     def is_blacklisted(self, symbol: str, current_pctl: Optional[float] = None) -> bool:
         if symbol not in self.blacklist:
@@ -615,12 +679,14 @@ class AIParameterOptimizer:
             "hard_release_at": now + timedelta(hours=penalty_hours)
         }
         logger.warning(f"سیستم ضد ضرر: ارز {symbol} زیر نظارت رفت - حداکثر تا {penalty_hours:.1f} ساعت مسدود می‌مونه، مگر اینکه زودتر شرایط بازار آروم بشه.")
+        self._save_persisted_state()
 
     def register_win(self, symbol: str):
         state = self.symbol_states[symbol]
         state["consecutive_losses"] = 0
         if symbol in self.blacklist:
             del self.blacklist[symbol]
+        self._save_persisted_state()
 
     def validate_and_clamp_params(self, new_params: dict) -> dict:
         clamped = {}
@@ -722,7 +788,13 @@ class AIParameterOptimizer:
             return False
         state = self.symbol_states[symbol]
         if state["last_optimized_time"] is None:
-            return True
+            # قبلاً اینجا True برمی‌گشت یعنی همون چرخه‌ی اول بعد از هر دیپلوی، با صفر
+            # معامله‌ی واقعی، پارامترهای پیش‌فرضِ جواب‌داده رو با یک حدس تک‌مرحله‌ای AI
+            # عوض می‌کرد. حالا فقط ساعت رو استارت می‌زنیم و می‌ذاریم پیش‌فرض‌ها (یا
+            # پارامترهای بازیابی‌شده از دیپلوی قبلی) حداقل یک دوره‌ی کامل امتحان بشن.
+            state["last_optimized_time"] = datetime.now()
+            self._save_persisted_state()
+            return False
         # فاصله‌ی بین بهینه‌سازی‌ها ثابت نیست: بر اساس سرعت واقعی مصرف بودجه‌ی روزانه
         # پویا تنظیم می‌شه تا هم بیشترین بهره از سهمیه گرفته بشه، هم هیچ‌وقت زودتر از
         # موعد ته نکشه.
@@ -799,9 +871,23 @@ No markdown formatting, no extra text.
                     raise ValueError("Groq یه پاسخ خالی برگردوند (احتمالاً توکن‌های reasoning تمام سقف max_tokens رو مصرف کردن)")
 
                 raw_params = json.loads(content)
-                state["params"] = self.validate_and_clamp_params(raw_params)
+                new_params = self.validate_and_clamp_params(raw_params)
+
+                # جدید: قبل از اعمال، پارامتر قبلی + آمار عملکرد اخیر (baseline) رو ذخیره
+                # می‌کنیم تا بشه بعد از چند معامله‌ی واقعی جدید، نتیجه‌ی این تغییر رو با
+                # قبل مقایسه کرد و اگه بدتر بود خودکار برگردوند (نه صرفاً حدس کورِ AI).
+                baseline = (journal.get_symbol_performance(symbol, lookback=10) if journal else
+                            {"count": 0, "win_rate": None, "avg_r": None})
+                state["pending_validation"] = {
+                    "previous_params": state["params"],
+                    "applied_at": datetime.now().isoformat(),
+                    "baseline_avg_r": baseline.get("avg_r"),
+                    "baseline_win_rate": baseline.get("win_rate")
+                }
+                state["params"] = new_params
                 state["last_optimized_time"] = datetime.now()
-                logger.info(f"پارامترهای ضد ضرر و پویای {symbol} بر اساس داده‌های روز بروزرسانی شد.")
+                self._save_persisted_state()
+                logger.info(f"پارامترهای ضد ضرر و پویای {symbol} بر اساس داده‌های روز بروزرسانی شد (نتیجه‌ش بعداً روی معاملات واقعی سنجیده می‌شه).")
             else:
                 logger.warning(f"Groq API برای {symbol} پاسخ {response.status_code} داد؛ پارامترهای قبلی حفظ شدن.")
         except Exception as e:
@@ -809,6 +895,60 @@ No markdown formatting, no extra text.
 
     def get_params(self, symbol: str) -> dict:
         return self.symbol_states[symbol]["params"]
+
+    # ==================== جدید: اعتبارسنجی نتیجه‌ی واقعی تنظیم پارامتر AI ====================
+    def validate_pending_optimizations(self, journal: "TradeJournal", telegram_sender=None):
+        """
+        کاملاً محاسباتیه (بدون هزینه‌ی Groq)، هر چرخه صدا زده می‌شه. برای هر نمادی که اخیراً
+        AI پارامترش رو عوض کرده، وقتی به‌اندازه‌ی کافی معامله‌ی واقعی جدید بسته شد، عملکرد
+        قبل/بعد رو مقایسه می‌کنه. اگه پارامتر جدید واقعاً بدتر عمل کرده، خودکار به پارامتر
+        قبلی برمی‌گرده - یعنی حدس AI دیگه نمی‌تونه بدون هیچ بازخوردی، پیوسته بدتر بشه.
+        """
+        changed = False
+        for symbol, state in self.symbol_states.items():
+            pv = state.get("pending_validation")
+            if not pv:
+                continue
+            new_trades = journal.get_symbol_trades_since(symbol, pv["applied_at"])
+            if len(new_trades) < self.config.AI_VALIDATION_MIN_TRADES:
+                continue
+
+            wins = [t for t in new_trades if t["pnl_usdt"] > 0]
+            new_avg_r = sum(t["r_multiple"] for t in new_trades) / len(new_trades)
+            new_win_rate = (len(wins) / len(new_trades)) * 100
+
+            baseline_avg_r = pv.get("baseline_avg_r")
+            baseline_win_rate = pv.get("baseline_win_rate")
+
+            if baseline_avg_r is not None:
+                regressed = (new_avg_r <= 0 and
+                             new_avg_r < baseline_avg_r - self.config.AI_VALIDATION_AVG_R_TOLERANCE)
+            else:
+                # داده‌ی قبلی کافی نبود - فقط اگه نتیجه‌ی جدید صریحاً بد بود برمی‌گردونیم
+                regressed = (new_avg_r <= self.config.AI_VALIDATION_FLOOR_AVG_R and
+                             new_win_rate < self.config.AI_VALIDATION_FLOOR_WIN_RATE)
+
+            msg = None
+            if regressed:
+                state["params"] = pv["previous_params"]
+                msg = (f"↩️ پارامترهای {symbol} چون بعد از تغییر اخیر AI عملکرد واقعی بدتر شد "
+                       f"(میانگین R جدید {new_avg_r:+.2f} در {len(new_trades)} معامله، در مقابل قبلیِ "
+                       f"{baseline_avg_r if baseline_avg_r is not None else 'نامشخص'}) خودکار به تنظیمات قبلی برگشت.")
+                logger.warning(msg)
+            else:
+                logger.info(f"{symbol}: تغییر اخیر پارامتر AI روی {len(new_trades)} معامله‌ی واقعی جدید تایید شد "
+                             f"(میانگین R {new_avg_r:+.2f}, نرخ برد {new_win_rate:.1f}%).")
+
+            state["pending_validation"] = None
+            changed = True
+            if msg and telegram_sender:
+                try:
+                    telegram_sender.send_system_status(msg)
+                except Exception:
+                    pass
+
+        if changed:
+            self._save_persisted_state()
 
     # ==================== جدید: ارزیابی سراسری رژیم کلی بازار ====================
     def assess_market_regime(self, macro_context: dict, portfolio_stats: dict) -> Optional[dict]:
@@ -893,10 +1033,28 @@ Respond ONLY with valid JSON, no markdown, no extra text, exactly this shape:
                 except Exception:
                     pass
 
+    def _quant_fallback_decision(self, context: dict, why: str) -> Dict:
+        """
+        جدید: قبلاً هر بار AI در دسترس نبود (سهمیه/خطا/کندی)، سیستم صد در صد همه‌ی
+        سیگنال‌ها رو رد می‌کرد - یعنی بخشی از «سیگنال کم» به‌خاطر ضعف بازار نبود، به‌خاطر
+        قطعی موقت Groq بود. این فال‌بک فقط زمانی سیگنال رو تایید می‌کنه که امتیاز کمّی
+        به‌وضوح بالاتر از آستانه‌ی معمولی باشه (آستانه + margin) - یعنی کیفیت پایین نمی‌آد،
+        فقط وقتی AI نیست، به سیگنال‌های خیلی قوی‌تر از حد معمول بدون تاییدش هم اجازه می‌ده.
+        """
+        score = context.get("quant_score")
+        threshold = context.get("signal_threshold_used")
+        if score is None or threshold is None:
+            return {"approve": False, "confidence": 0, "reason": f"{why} - داده‌ی کافی برای تصمیم محاسباتی جایگزین وجود نداره"}
+        required = threshold + self.config.JUDGE_FALLBACK_SCORE_MARGIN
+        if score >= required:
+            return {"approve": True, "confidence": self.config.JUDGE_FALLBACK_CONFIDENCE,
+                     "reason": f"{why} - طبق آستانه‌ی محاسباتیِ سخت‌گیرانه‌تر تایید موقت شد (امتیاز {score} >= {required:.2f})"}
+        return {"approve": False, "confidence": 0,
+                "reason": f"{why} - امتیاز {score} به آستانه‌ی سخت‌گیرانه‌ی جایگزین ({required:.2f}) نرسید"}
+
     def evaluate_trade_candidate(self, symbol: str, side: str, context: dict) -> Dict:
-        default = {"approve": False, "confidence": 0, "reason": "بدون دسترسی به AI - طبق تنظیم، سیگنال رد شد (تایید AI الزامیه)"}
         if not self.groq_api_key:
-            return default
+            return self._quant_fallback_decision(context, "بدون دسترسی به AI (کلید Groq تنظیم نشده)")
 
         # نکته‌ی مهم: budget.can_consume("judge") تقریباً همیشه True برمی‌گردونه (این
         # لایه بالاترین اولویت رو داره و سهم رزرو-شده‌ی بزرگی از بودجه‌ی روزانه داره) و
@@ -927,9 +1085,8 @@ Respond ONLY with valid JSON, no markdown, no extra text, exactly this shape:
                         )
                     except Exception:
                         pass
-            logger.warning(f"{symbol}: سهمیه‌ی رایگان Groq تموم شده - طبق تنظیم، سیگنال رد می‌شه (تایید AI الزامیه).")
-            return {"approve": False, "confidence": 0,
-                    "reason": "سهمیه‌ی رایگان Groq تموم شده - طبق تنظیم، سیگنال رد شد (تایید AI الزامیه)"}
+            logger.warning(f"{symbol}: سهمیه‌ی رایگان Groq تموم شده - به فال‌بک محاسباتیِ سخت‌گیرانه‌تر سوییچ می‌شه.")
+            return self._quant_fallback_decision(context, "سهمیه‌ی رایگان Groq تموم شده")
 
         prompt = f"""You are a veteran discretionary crypto trader with 15+ years of experience. You deeply understand that markets are not static: regimes shift, correlations break down, momentum exhausts, and no fixed rule set can fully capture that. You are reviewing a trade candidate that ALREADY passed a strict quantitative multi-factor scoring system (trend, RSI momentum, MACD, volume, market structure, multi-timeframe alignment, volatility regime).
 
@@ -957,9 +1114,9 @@ Respond ONLY with valid JSON, no markdown, no extra text, in exactly this shape:
                 logger.warning(f"لایه‌ی قضاوت AI برای {symbol} پاسخ {response.status_code} داد؛ به تصمیم کمی اکتفا می‌شه.")
                 self._alert_judge_error(
                     f"لایه‌ی قضاوت هوشمند معامله پاسخ غیرمنتظره {response.status_code} از Groq دریافت کرد (نماد: {symbol}).\n\n"
-                    "طبق تنظیم فعلی، تا رفع این مشکل هیچ سیگنال یا معامله‌ی جدیدی ارسال نمی‌شه (تایید AI الزامیه)."
+                    "طبق تنظیم فعلی، به فال‌بک محاسباتیِ سخت‌گیرانه‌تر سوییچ می‌شه تا رفع مشکل."
                 )
-                return default
+                return self._quant_fallback_decision(context, f"پاسخ {response.status_code} از Groq")
             res_data = response.json()
             self.budget.record_usage("judge", res_data, fallback_tokens=500)
             content = res_data['choices'][0]['message']['content'].strip()
@@ -978,9 +1135,9 @@ Respond ONLY with valid JSON, no markdown, no extra text, in exactly this shape:
             logger.error(f"خطا در لایه‌ی قضاوت AI برای {symbol}: {e}")
             self._alert_judge_error(
                 f"لایه‌ی قضاوت هوشمند معامله برای نماد {symbol} با خطا مواجه شد: {e}\n\n"
-                "طبق تنظیم فعلی، تا رفع این مشکل هیچ سیگنال یا معامله‌ی جدیدی ارسال نمی‌شه (تایید AI الزامیه)."
+                "طبق تنظیم فعلی، به فال‌بک محاسباتیِ سخت‌گیرانه‌تر سوییچ می‌شه تا رفع مشکل."
             )
-            return default
+            return self._quant_fallback_decision(context, "خطای فنی در ارتباط با Groq")
 
 # ==================== جدید: مدیریت وضعیت سراسری پرتفوی (خودتنظیمی با جوی بازار) ====================
 class PortfolioStateManager:
@@ -1413,6 +1570,22 @@ class TradeJournal:
         candidates.sort(key=lambda x: x[0])
         latest = candidates[-1][1]
         return {"symbol": latest["symbol"], "r_multiple": latest["r_multiple"], "pnl_usdt": latest["pnl_usdt"]}
+
+    def get_symbol_performance(self, symbol: str, lookback: int = 10) -> Dict:
+        """مثل get_side_performance ولی صرف‌نظر از side - برای baseline اعتبارسنجی تنظیم پارامتر AI."""
+        recs = [r for r in self.records if r["symbol"] == symbol]
+        if not recs:
+            return {"count": 0, "win_rate": None, "avg_r": None}
+        recent = recs[-lookback:]
+        wins = [r for r in recent if r["pnl_usdt"] > 0]
+        return {
+            "count": len(recent),
+            "win_rate": round((len(wins) / len(recent)) * 100, 1),
+            "avg_r": round(sum(r["r_multiple"] for r in recent) / len(recent), 2)
+        }
+
+    def get_symbol_trades_since(self, symbol: str, since_iso: str) -> List[Dict]:
+        return [r for r in self.records if r["symbol"] == symbol and r["timestamp"] > since_iso]
 
     def get_side_performance(self, symbol: str, side: str, lookback: int = 15) -> Dict:
         side_records = [r for r in self.records if r["symbol"] == symbol and r["side"] == side]
@@ -1994,6 +2167,9 @@ class HybridTradingSystem:
         # جدید: وضعیت خودکار پرتفوی هر چرخه بازمحاسبه می‌شه (ضمن اینکه بعد از هر
         # بسته‌شدن معامله هم بلافاصله بازمحاسبه می‌شه - این یکی صرفاً برای اطمینانه)
         self.portfolio_state.recompute()
+
+        # جدید: اعتبارسنجی محاسباتی (بدون هزینه‌ی Groq) نتیجه‌ی واقعی هر تغییر پارامتر AI
+        self.ai_optimizer.validate_pending_optimizations(self.journal, telegram_sender=self.telegram)
 
         if self.correlation_manager.should_refresh():
             self.correlation_manager.refresh()
