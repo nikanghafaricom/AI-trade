@@ -99,6 +99,14 @@ class Config:
     MIN_SIGNAL_SCORE = 7.5
     ATR_PERCENTILE_MAX = 97
 
+    # ---- جدید: حداکثر نسبت مجاز هزینه‌ی رفت‌وبرگشت (اسپرد+کارمزد) به ریسک ----
+    # علت اصلی ضررهای بزرگ‌تر از 1R در ژورنال (مثل AVAX -1.63R) این بود که حد ضرر
+    # به اندازه‌ی کافی از اسپرد واقعی صرافی فاصله نداشت، پس بخش زیادی از "1R" صرف
+    # هزینه‌ی معامله می‌شد. به‌جای رد کردن سیگنال (که تعداد سیگنال رو کم می‌کرد)، وقتی
+    # این نسبت رد بشه، حد ضرر به اندازه‌ی لازم خودکار گشادتر می‌شه - و چون سایز پوزیشن
+    # بر اساس فاصله‌ی حد ضرر محاسبه می‌شه، ریسک دلاری معامله هیچ تغییری نمی‌کنه.
+    MAX_COST_TO_RISK_RATIO = float(os.getenv("MAX_COST_TO_RISK_RATIO", 0.30))
+
     VIRTUAL_CAPITAL_USDT = float(os.getenv("VIRTUAL_CAPITAL_USDT", 10000))
     RISK_PER_TRADE_PCT = float(os.getenv("RISK_PER_TRADE_PCT", 1.5))
     MAX_CONCURRENT_TRADES = int(os.getenv("MAX_CONCURRENT_TRADES", 4))
@@ -1936,9 +1944,29 @@ class TelegramSender:
 
         p = self.ai_optimizer.get_params(symbol)
 
+        # ---- جدید: تنظیم حد ضرر بر اساس هزینه‌ی واقعی معامله (اسپرد+کارمزد) ----
+        # اگه اسپرد لحظه‌ای صرافی نسبت به حد ضررِ خام (بر اساس ATR/سطح حمایت) خیلی بزرگ
+        # باشه، بخش زیادی از "1R" صرف هزینه‌ی رفت‌وبرگشت می‌شه و ضرر واقعی به‌طور سیستماتیک
+        # بزرگ‌تر از عدد اسمی در می‌آد (این دقیقاً چیزیه که باعث ضررهای -1.6R تا -1.8R شده).
+        # این تابع حداقل فاصله‌ی لازم رو حساب می‌کنه تا هزینه حداکثر MAX_COST_TO_RISK_RATIO
+        # از ریسک رو ببلعه - بدون رد کردن سیگنال (سایز پوزیشن به‌خاطر ریسک‌محور بودن
+        # فرمول position sizing خودکار کوچیک‌تر می‌شه، پس ریسک دلاری معامله ثابت می‌مونه).
+        spread_pct_now = (macro_context or {}).get("spread_pct")
+
+        def _min_risk_for_cost(px: float) -> float:
+            if not spread_pct_now:
+                return 0.0
+            cost_pct_per_side = (self.config.EXCHANGE_TAKER_FEE_PCT + (spread_pct_now / 2)) / 100
+            est_roundtrip_cost = (px * 2) * cost_pct_per_side
+            return est_roundtrip_cost / self.config.MAX_COST_TO_RISK_RATIO
+
         if side == "BUY":
             stop_loss = min(float(latest['support']), price - (p["sl_atr_mult"] * atr))
             risk = price - stop_loss
+            min_required_risk = _min_risk_for_cost(price)
+            if min_required_risk > risk:
+                risk = min_required_risk
+                stop_loss = price - risk
             tp1 = round(price + (p["tp1_mult"] * risk), 4)
             tp2 = round(price + (p["tp2_mult"] * risk), 4)
             tp3 = round(price + (p["tp3_mult"] * risk), 4)
@@ -1946,6 +1974,10 @@ class TelegramSender:
         else:
             stop_loss = max(float(latest['resistance']), price + (p["sl_atr_mult"] * atr))
             risk = stop_loss - price
+            min_required_risk = _min_risk_for_cost(price)
+            if min_required_risk > risk:
+                risk = min_required_risk
+                stop_loss = price + risk
             tp1 = round(price - (p["tp1_mult"] * risk), 4)
             tp2 = round(price - (p["tp2_mult"] * risk), 4)
             tp3 = round(price - (p["tp3_mult"] * risk), 4)
