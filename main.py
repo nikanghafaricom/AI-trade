@@ -126,7 +126,12 @@ class Config:
     DAILY_LOSS_LIMIT_PCT = float(os.getenv("DAILY_LOSS_LIMIT_PCT", 3.0))       # بعد از این ضرر روزانه، ورود جدید تا فردا متوقف
     DAILY_PROFIT_TARGET_PCT = float(os.getenv("DAILY_PROFIT_TARGET_PCT", 1.0)) # بعد از این سود، سود روز محافظت می‌شه
     DAILY_MAX_SIGNALS = int(os.getenv("DAILY_MAX_SIGNALS", 15))
-    MIN_DAILY_SIGNALS_TARGET = int(os.getenv("MIN_DAILY_SIGNALS_TARGET", 2))   # اگه کمتر بود، آستانه‌ها تدریجی نرم می‌شن
+    MIN_DAILY_SIGNALS_TARGET = int(os.getenv("MIN_DAILY_SIGNALS_TARGET", 2))   # کف سیگنال روزانه در بازار خراب
+    GOOD_MARKET_SIGNALS_TARGET = int(os.getenv("GOOD_MARKET_SIGNALS_TARGET", 6))  # هدف سیگنال روزانه در روند صعودی
+    GOOD_MARKET_EXTRA_SLOTS = int(os.getenv("GOOD_MARKET_EXTRA_SLOTS", 2))     # معامله‌ی هم‌زمان اضافه در روند صعودی
+    GOOD_MARKET_LOCK_MULT = float(os.getenv("GOOD_MARKET_LOCK_MULT", 3.0))     # در بازار خوب قفل سود روزانه ۳ برابر دیرتر
+    GOAL_BOOST = float(os.getenv("GOAL_BOOST", 1.25))                          # تقویت حجم سیگنال قوی وقتی بازار خرابه و هنوز به هدف روز نرسیدیم
+    MAX_SIZE_MULT = float(os.getenv("MAX_SIZE_MULT", 1.5))                     # سقف نهایی ضریب حجم (یعنی ریسک حداکثر ۱.۵ برابر پایه)
 
     # ---- ستاپ برگشت از کف (Bounce): طبق تصمیم قبلی پیش‌فرض خاموشه. با REVERSION_ENABLED=true روشن می‌شه ----
     REVERSION_ENABLED = os.getenv("REVERSION_ENABLED", "false").strip().lower() == "true"
@@ -1560,15 +1565,16 @@ class RiskManager:
         return min(qty, max_notional / entry)
 
     def can_open_trade(self, symbol: str, active_trades: Dict, correlation_manager: Optional["CorrelationManager"] = None,
-                        btc_volatility_pctl: Optional[float] = None) -> Tuple[bool, str]:
-        if len(active_trades) >= self.config.MAX_CONCURRENT_TRADES:
-            return False, f"به سقف معاملات هم‌زمان ({self.config.MAX_CONCURRENT_TRADES}) رسیدیم"
+                        btc_volatility_pctl: Optional[float] = None, extra_slots: int = 0) -> Tuple[bool, str]:
+        max_conc = self.config.MAX_CONCURRENT_TRADES + extra_slots
+        if len(active_trades) >= max_conc:
+            return False, f"به سقف معاملات هم‌زمان ({max_conc}) رسیدیم"
         if any(t.get('symbol') == symbol for t in active_trades.values()):
             return False, "برای این نماد همین الان معامله‌ی باز داریم"
         if correlation_manager is not None:
             threshold = correlation_manager.get_dynamic_threshold(btc_volatility_pctl)
             corr_count = correlation_manager.correlated_count(symbol, active_trades, threshold)
-            if corr_count >= self.config.MAX_CORRELATED_TRADES:
+            if corr_count >= self.config.MAX_CORRELATED_TRADES + (1 if extra_slots else 0):
                 return False, f"به سقف اکسپوژر همبسته رسیدیم (آستانه‌ی لحظه‌ای {threshold:.2f}، ریسک همبستگی)"
         else:
             group = self.config.SYMBOL_GROUPS.get(symbol, "other")
@@ -2084,7 +2090,7 @@ class TelegramSender:
         size_mult = p["stress_size_mult"] if stress_active else 1.0
         if setup == "REVERSION":
             size_mult *= 0.85
-        size_mult = max(0.2, size_mult * portfolio_size_mult * conviction_mult)
+        size_mult = max(0.2, min(self.config.MAX_SIZE_MULT, size_mult * portfolio_size_mult * conviction_mult))
 
         qty = self.risk_manager.calculate_position_size(price, stop_loss, size_mult=size_mult)
         notional = qty * price
@@ -2176,6 +2182,7 @@ class HybridTradingSystem:
         self.signals_today: List[datetime] = self._load_signal_log()
         self._pause_alert_day: Optional[str] = None
         self.judge_cache: Dict[str, Dict] = {}
+        self.current_regime = "RANGE"
 
     # ---------------- ردیابی روزانه ----------------
     def _load_signal_log(self) -> List[datetime]:
@@ -2220,21 +2227,31 @@ class HybridTradingSystem:
             return True, f"سقف سیگنال روزانه ({self.config.DAILY_MAX_SIGNALS}) پر شد"
         return False, ""
 
+    def _is_good_market(self) -> bool:
+        return self.current_regime == "TREND_UP"
+
+    def _daily_signal_target(self) -> int:
+        return self.config.GOOD_MARKET_SIGNALS_TARGET if self._is_good_market() else self.config.MIN_DAILY_SIGNALS_TARGET
+
+    def _profit_lock_level(self) -> float:
+        base = self.config.DAILY_PROFIT_TARGET_PCT
+        return base * self.config.GOOD_MARKET_LOCK_MULT if self._is_good_market() else base * 1.5
+
     def _threshold_relax(self, pnl_pct: float) -> float:
         """
         ضد قفل: اگه امروز تعداد سیگنال‌ها از هدف کمتره و مدتیه سیگنالی نیومده، آستانه‌ها تدریجی
         (حداکثر ۱.۲ امتیاز) نرم می‌شن. اگه امروز ضرر جدی خوردیم یا سود هدف رو گرفتیم، نرم‌شدن صفره.
         """
         n = len(self.signals_today)
-        if n >= self.config.MIN_DAILY_SIGNALS_TARGET:
+        if n >= self._daily_signal_target():
             return 0.0
-        if pnl_pct <= -0.5 * self.config.DAILY_LOSS_LIMIT_PCT or pnl_pct >= self.config.DAILY_PROFIT_TARGET_PCT:
+        if pnl_pct <= -0.5 * self.config.DAILY_LOSS_LIMIT_PCT or pnl_pct >= self._profit_lock_level():
             return 0.0
         now = datetime.now()
         midnight = datetime.combine(now.date(), datetime.min.time())
         anchor = max(self.signals_today[-1], midnight) if self.signals_today else midnight
         idle_h = (now - anchor).total_seconds() / 3600.0
-        relax = min(1.2, max(0.0, idle_h - 2.0) * 0.15)
+        relax = min(1.2, max(0.0, idle_h - (1.0 if self._is_good_market() else 2.0)) * 0.15)
         if self.portfolio_state.state == "DEFENSIVE":
             relax *= 0.5
         return relax
@@ -2244,11 +2261,19 @@ class HybridTradingSystem:
         pnl_pct = self._today_pnl_pct()
         adj["day_pnl_pct"] = round(pnl_pct, 2)
         adj["day_mode"] = "NORMAL"
-        if pnl_pct >= self.config.DAILY_PROFIT_TARGET_PCT:
+        adj["goal_boost"] = 1.0
+        if pnl_pct >= self._profit_lock_level():
             # هدف روزانه گرفته شد: سود روز محافظت می‌شه ولی درِ فرصت‌های قوی بسته نمی‌شه
-            adj["score_adjustment"] = adj["score_adjustment"] + 0.7
-            adj["size_mult"] = round(adj["size_mult"] * 0.75, 3)
+            adj["score_adjustment"] = adj["score_adjustment"] + 0.5
+            adj["size_mult"] = round(adj["size_mult"] * 0.8, 3)
             adj["day_mode"] = "PROFIT_LOCK"
+        elif not self._is_good_market() and pnl_pct < self.config.DAILY_PROFIT_TARGET_PCT and pnl_pct > -0.5 * self.config.DAILY_LOSS_LIMIT_PCT:
+            # بازار خراب و هنوز به ۱٪ روز نرسیدیم: حجم کف بالاتر + تقویت سیگنال‌های قوی (تا سقف MAX_SIZE_MULT)
+            adj["size_mult"] = max(adj["size_mult"], 0.85)
+            adj["goal_boost"] = self.config.GOAL_BOOST
+            adj["day_mode"] = "GOAL_CHASE"
+        if self._is_good_market():
+            adj["cooldown_mult"] = adj.get("cooldown_mult", 1.0) * 0.6
         adj["threshold_relax"] = self._threshold_relax(pnl_pct)
         adj["signals_today"] = len(self.signals_today)
         return adj
@@ -2365,7 +2390,8 @@ class HybridTradingSystem:
             can_open, reason = self.risk_manager.can_open_trade(
                 symbol, active_trades_snapshot,
                 correlation_manager=self.correlation_manager,
-                btc_volatility_pctl=(macro_context or {}).get("btc_volatility_pctl")
+                btc_volatility_pctl=(macro_context or {}).get("btc_volatility_pctl"),
+                extra_slots=self.config.GOOD_MARKET_EXTRA_SLOTS if self._is_good_market() else 0
             )
             if not can_open:
                 logger.info(f"{symbol}: سیگنال {rule_signal} رد شد - {reason}")
@@ -2407,6 +2433,8 @@ class HybridTradingSystem:
                     logger.info(f"{symbol}: کاندید {setup} توسط قضاوت AI رد شد (احتمال برد {judge['confidence']}%، حداقل لازم {required}%) - {judge['reason']}")
                     return True
                 conviction = 0.75 + 0.5 * max(0.0, min(1.0, (judge["confidence"] - required) / 25.0))
+                if conviction >= 1.0 and adj.get("goal_boost", 1.0) > 1.0:
+                    conviction *= adj["goal_boost"]
                 judge_reason, judge_conf = judge["reason"], judge["confidence"]
             else:
                 if self.config.AI_REQUIRED:
@@ -2470,6 +2498,7 @@ class HybridTradingSystem:
             self.correlation_manager.refresh()
 
         macro_context = self._build_macro_context()
+        self.current_regime = macro_context.get("local_regime", "RANGE")
         logger.info(f"رژیم محلی بازار: {macro_context.get('local_regime')} | روند 4h بیت‌کوین: {macro_context.get('btc_trend_4h')} | "
                     f"بازدهی ۱۲ساعته: {macro_context.get('btc_ret_12h_pct')}% | ER: {macro_context.get('btc_efficiency_ratio')} | "
                     f"سیگنال امروز: {len(self.signals_today)} | PnL امروز: {self._today_pnl_pct():+.2f}%")
@@ -2525,7 +2554,7 @@ class HybridTradingSystem:
 • فیلتر اسپرد اصلاح شد (دیگه داده‌ی خراب ۱۴٪ و ۳۰٪ سیگنال‌ها رو نمی‌کشه)
 • قضاوت AI حالت احتمال برد داره و اگه AI قطع بود ربات قفل نمی‌شه
 • حالت پرتفوی دیگه قفل نمی‌شه (فقط آمار ۱۲ ساعت اخیر + بازیابی زمانی)
-• اگه امروز سیگنال کم بود، آستانه‌ها تدریجی نرم می‌شن (هدف: حداقل {self.config.MIN_DAILY_SIGNALS_TARGET} سیگنال)
+• بازار خراب: حداقل {self.config.MIN_DAILY_SIGNALS_TARGET} سیگنال با هدف برآیند ≥{self.config.DAILY_PROFIT_TARGET_PCT}% در ۲۴ ساعت (سیگنال قوی حجم بیشتر می‌گیره)\n• بازار صعودی: هدف {self.config.GOOD_MARKET_SIGNALS_TARGET}+ سیگنال، {self.config.GOOD_MARKET_EXTRA_SLOTS} معامله‌ی هم‌زمان بیشتر، کول‌داون کوتاه‌تر و قفل سود دیرتر
 • حفاظت روزانه: توقف ورود بعد از ضرر {self.config.DAILY_LOSS_LIMIT_PCT}% و محافظت سود بعد از {self.config.DAILY_PROFIT_TARGET_PCT}%
 
 ⚙️ ریسک پایه: {self.config.RISK_PER_TRADE_PCT}% | حداکثر هم‌زمان: {self.config.MAX_CONCURRENT_TRADES} | سقف سیگنال روزانه: {self.config.DAILY_MAX_SIGNALS}
