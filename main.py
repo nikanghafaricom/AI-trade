@@ -1977,26 +1977,30 @@ class TelegramSender:
             logger.error(f"❌ خطا در تست اتصال تلگرام: {e}")
             return False
 
-    def send_system_status(self, text: str):
+    def _post_text(self, chat_id, text: str, label: str) -> bool:
+        """ارسال با Markdown و در صورت خطای پارس (مثلاً زیرخط _ تو متن) ارسال مجدد به‌صورت متن ساده، تا هیچ پیامی گم نشه."""
         try:
             r = requests.post(f"{self.base_url}/sendMessage",
-                               json={"chat_id": self.config.TELEGRAM_CHAT_ID, "text": text, "parse_mode": "Markdown"},
-                               timeout=10)
+                               json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}, timeout=10)
+            if r.status_code == 200:
+                return True
+            logger.warning(f"{label}: ارسال Markdown ناموفق ({r.status_code}) - تلاش مجدد بدون قالب‌بندی. {r.text[:150]}")
+            r = requests.post(f"{self.base_url}/sendMessage",
+                               json={"chat_id": chat_id, "text": text.replace("**", "")}, timeout=10)
             if r.status_code != 200:
-                logger.error(f"ارسال پیام وضعیت ناموفق بود: {r.status_code} {r.text}")
+                logger.error(f"{label}: ارسال ناموفق بود: {r.status_code} {r.text}")
+                return False
+            return True
         except Exception as e:
-            logger.error(f"خطای ارسال پیام به تلگرام: {e}")
+            logger.error(f"{label}: خطای ارسال به تلگرام: {e}")
+            return False
+
+    def send_system_status(self, text: str):
+        self._post_text(self.config.TELEGRAM_CHAT_ID, text, "پیام وضعیت")
 
     def send_personal_message(self, text: str):
         target_id = self.config.PERSONAL_CHAT_ID or self.config.TELEGRAM_CHAT_ID
-        try:
-            r = requests.post(f"{self.base_url}/sendMessage",
-                               json={"chat_id": target_id, "text": text, "parse_mode": "Markdown"},
-                               timeout=10)
-            if r.status_code != 200:
-                logger.error(f"ارسال پیام شخصی ناموفق بود: {r.status_code} {r.text}")
-        except Exception as e:
-            logger.error(f"خطای ارسال پیام شخصی به تلگرام: {e}")
+        self._post_text(target_id, text, "پیام شخصی")
 
     def send_error_alert(self, text: str):
         self.send_personal_message(f"🚨 **هشدار سیستم** 🚨\n\n{text}")
@@ -2549,7 +2553,7 @@ class HybridTradingSystem:
 
 🧠 **چی عوض شد:**
 • رژیم بازار (صعودی / رنج / نزولی / پرنوسان) هر چرخه از روی بیت‌کوین تشخیص داده می‌شه و آستانه‌ها باهاش تنظیم می‌شن
-• ستاپ فعال: روند (Trend){' + برگشت از کف (Bounce)' if self.config.REVERSION_ENABLED else ' - ستاپ برگشت از کف طبق تصمیم شما خاموشه (REVERSION_ENABLED=true روشنش می‌کنه)'}
+• ستاپ فعال: روند (Trend){' + برگشت از کف (Bounce)' if self.config.REVERSION_ENABLED else ' - ستاپ برگشت از کف طبق تصمیم شما خاموشه (با متغیر REVERSION ENABLED برابر true روشن می‌شه)'}
 • حد ضرر ساختاری و تنگ‌تر، تارگت‌های نزدیک‌تر (۱R / ۱.۸R / ۳R)، خروج محافظتی و Time-stop
 • فیلتر اسپرد اصلاح شد (دیگه داده‌ی خراب ۱۴٪ و ۳۰٪ سیگنال‌ها رو نمی‌کشه)
 • قضاوت AI حالت احتمال برد داره و اگه AI قطع بود ربات قفل نمی‌شه
