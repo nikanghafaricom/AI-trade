@@ -50,7 +50,7 @@ threading.Thread(target=start_health_check_server, daemon=True).start()
 
 # ==================== تنظیمات ====================
 class Config:
-    EXCHANGE_ID = "coinex"
+    EXCHANGE_ID = "binance"
     API_KEY = os.getenv("EXCHANGE_API_KEY", "")
     SECRET = os.getenv("EXCHANGE_SECRET", "")
     PASSWORD = os.getenv("EXCHANGE_PASSWORD", "")
