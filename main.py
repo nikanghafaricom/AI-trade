@@ -184,9 +184,28 @@ class DataLayer:
             'options': {'defaultType': 'spot'}
         })
 
+    # آدرس‌های داده‌ی عمومی بایننس (به ترتیب اولویت). data-api.binance.vision مخصوص دیتای
+    # عمومیه و روی IP سرورهای آمریکا (مثل Render اوریجینال) بلاک نمی‌شه.
+    BINANCE_PUBLIC_HOSTS = ["https://data-api.binance.vision", "https://api.binance.com"]
+
+    def _binance_get(self, path: str, params: dict):
+        last_error = None
+        for host in self.BINANCE_PUBLIC_HOSTS:
+            try:
+                resp = requests.get(f"{host}{path}", params=params, timeout=10)
+                if resp.status_code == 200:
+                    return resp.json()
+                last_error = f"{host} -> HTTP {resp.status_code}: {resp.text[:120]}"
+            except Exception as e:
+                last_error = f"{host} -> {e}"
+        raise RuntimeError(last_error)
+
     def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 150) -> pd.DataFrame:
         try:
-            ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+            raw = self._binance_get("/api/v3/klines", {
+                "symbol": symbol.replace("/", ""), "interval": timeframe, "limit": limit
+            })
+            ohlcv = [[r[0], float(r[1]), float(r[2]), float(r[3]), float(r[4]), float(r[5])] for r in raw]
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
             return df
@@ -205,7 +224,9 @@ class DataLayer:
 
     def fetch_spread_pct(self, symbol: str) -> Optional[float]:
         try:
-            ob = self.exchange.fetch_order_book(symbol, limit=5)
+            ob = self._binance_get("/api/v3/depth", {"symbol": symbol.replace("/", ""), "limit": 5})
+            ob = {"bids": [[float(x[0]), float(x[1])] for x in ob.get("bids", [])],
+                  "asks": [[float(x[0]), float(x[1])] for x in ob.get("asks", [])]}
             best_bid = ob['bids'][0][0] if ob.get('bids') else None
             best_ask = ob['asks'][0][0] if ob.get('asks') else None
             if not best_bid or not best_ask:
