@@ -50,7 +50,7 @@ threading.Thread(target=start_health_check_server, daemon=True).start()
 
 # ==================== تنظیمات ====================
 class Config:
-    EXCHANGE_ID = "binance"
+    EXCHANGE_ID = "coinex"
     API_KEY = os.getenv("EXCHANGE_API_KEY", "")
     SECRET = os.getenv("EXCHANGE_SECRET", "")
     PASSWORD = os.getenv("EXCHANGE_PASSWORD", "")
@@ -152,43 +152,7 @@ class Config:
     GROQ_OPTIMIZER_MIN_INTERVAL_HOURS = float(os.getenv("GROQ_OPTIMIZER_MIN_INTERVAL_HOURS", 1.0))
     GROQ_OPTIMIZER_MAX_INTERVAL_HOURS = float(os.getenv("GROQ_OPTIMIZER_MAX_INTERVAL_HOURS", 4.0))
 
-    # ==================== مسیر ذخیره‌ی فایل‌ها ====================
-    # اگه روی هاست، دیسک موقت باشه با هر دپلوی ژورنال/پارامترها/وضعیت پاک می‌شه و ربات
-    # "از صفر" شروع می‌کنه. یه Volume دائمی بساز و DATA_DIR رو بهش وصل کن (مثلاً /data).
-    DATA_DIR = os.getenv("DATA_DIR", ".")
-
-    # ==================== معامله‌ی مجازیِ پنهان (Shadow) ====================
-    # وقتی وضعیت NORMAL نیست، ربات سیگنال‌هایی که در حالت عادی می‌گرفت رو بی‌صدا
-    # (بدون تلگرام، بدون اثر روی بلک‌لیست) مجازی باز می‌کنه و نتیجه‌شون رو می‌سنجه.
-    SHADOW_ENABLED = os.getenv("SHADOW_ENABLED", "true").lower() == "true"
-    SHADOW_MAX_OPEN = int(os.getenv("SHADOW_MAX_OPEN", 4))
-    SHADOW_RECOVERY_WINDOW = int(os.getenv("SHADOW_RECOVERY_WINDOW", 8))
-    SHADOW_MIN_TRADES_FOR_RECOVERY = int(os.getenv("SHADOW_MIN_TRADES_FOR_RECOVERY", 4))
-    SHADOW_RECOVERY_MIN_WIN_RATE = float(os.getenv("SHADOW_RECOVERY_MIN_WIN_RATE", 50))
-    SHADOW_RECOVERY_MIN_AVG_R = float(os.getenv("SHADOW_RECOVERY_MIN_AVG_R", 0.10))
-    # سقف زمانی: هیچ‌وقت "تا ابد" تو تدافعی/محتاط نمی‌مونه (پشتیبان وقتی سیگنال شدو کم باشه)
-    DEFENSIVE_MAX_HOURS = float(os.getenv("DEFENSIVE_MAX_HOURS", 18))
-    CAUTION_MAX_HOURS = float(os.getenv("CAUTION_MAX_HOURS", 10))
-
-    # ==================== فیلترهای ورود (جلوگیری از خرید در ریزش) ====================
-    BTC_CRASH_GUARD = os.getenv("BTC_CRASH_GUARD", "false").lower() == "true"
-    BTC_CRASH_DROP_PCT_4H = float(os.getenv("BTC_CRASH_DROP_PCT_4H", 1.5))
-    BTC_CRASH_RSI_MAX = float(os.getenv("BTC_CRASH_RSI_MAX", 40))
-    # محدودیت پوزیشن تکراری/سقف هم‌زمان: پیش‌فرض خاموش تا رفتار ورود مثل روز اول بمونه
-    STRICT_POSITION_RULES = os.getenv("STRICT_POSITION_RULES", "false").lower() == "true"
-    ENTRY_HARD_GATES = os.getenv("ENTRY_HARD_GATES", "false").lower() == "true"
-
-    # ==================== لنگر انداختن تنظیم‌گر AI (جلوگیری از drift) ====================
-    AI_TUNE_RISK_KEYS = os.getenv("AI_TUNE_RISK_KEYS", "false").lower() == "true"
-    AI_MAX_DEVIATION_PCT = float(os.getenv("AI_MAX_DEVIATION_PCT", 0.15))
-    AI_RSI_MAX_DEVIATION_POINTS = float(os.getenv("AI_RSI_MAX_DEVIATION_POINTS", 4))
-    AI_BLEND = float(os.getenv("AI_BLEND", 0.5))
-
-    def path(self, name: str) -> str:
-        return os.path.join(self.DATA_DIR, name)
-
     def validate(self):
-        os.makedirs(self.DATA_DIR, exist_ok=True)
         required = {
             "TELEGRAM_BOT_TOKEN": self.TELEGRAM_BOT_TOKEN,
             "TELEGRAM_CHAT_ID": self.TELEGRAM_CHAT_ID,
@@ -220,28 +184,9 @@ class DataLayer:
             'options': {'defaultType': 'spot'}
         })
 
-    # آدرس‌های داده‌ی عمومی بایننس (به ترتیب اولویت). data-api.binance.vision مخصوص دیتای
-    # عمومیه و روی IP سرورهای آمریکا (مثل Render اوریجینال) بلاک نمی‌شه.
-    BINANCE_PUBLIC_HOSTS = ["https://data-api.binance.vision", "https://api.binance.com"]
-
-    def _binance_get(self, path: str, params: dict):
-        last_error = None
-        for host in self.BINANCE_PUBLIC_HOSTS:
-            try:
-                resp = requests.get(f"{host}{path}", params=params, timeout=10)
-                if resp.status_code == 200:
-                    return resp.json()
-                last_error = f"{host} -> HTTP {resp.status_code}: {resp.text[:120]}"
-            except Exception as e:
-                last_error = f"{host} -> {e}"
-        raise RuntimeError(last_error)
-
     def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 150) -> pd.DataFrame:
         try:
-            raw = self._binance_get("/api/v3/klines", {
-                "symbol": symbol.replace("/", ""), "interval": timeframe, "limit": limit
-            })
-            ohlcv = [[r[0], float(r[1]), float(r[2]), float(r[3]), float(r[4]), float(r[5])] for r in raw]
+            ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
             return df
@@ -260,9 +205,7 @@ class DataLayer:
 
     def fetch_spread_pct(self, symbol: str) -> Optional[float]:
         try:
-            ob = self._binance_get("/api/v3/depth", {"symbol": symbol.replace("/", ""), "limit": 5})
-            ob = {"bids": [[float(x[0]), float(x[1])] for x in ob.get("bids", [])],
-                  "asks": [[float(x[0]), float(x[1])] for x in ob.get("asks", [])]}
+            ob = self.exchange.fetch_order_book(symbol, limit=5)
             best_bid = ob['bids'][0][0] if ob.get('bids') else None
             best_ask = ob['asks'][0][0] if ob.get('asks') else None
             if not best_bid or not best_ask:
@@ -634,13 +577,10 @@ class AIParameterOptimizer:
         self.symbol_states = {}
         for sym in config.SYMBOLS:
             merged_params = {**default_params, **SYMBOL_PARAM_OVERRIDES.get(sym, {})}
-            clamped_base = self.validate_and_clamp_params(merged_params)
             self.symbol_states[sym] = {
                 "last_optimized_time": None,
                 "consecutive_losses": 0,
-                "params": dict(clamped_base),
-                # پارامترهای دست‌چین‌شده‌ی پایه - AI فقط می‌تونه کمی از این فاصله بگیره
-                "base_params": dict(clamped_base)
+                "params": self.validate_and_clamp_params(merged_params)
             }
         self.optimization_interval = timedelta(hours=2)
 
@@ -828,7 +768,7 @@ You are an advanced quantitative trading AI. First, analyze the following key ma
 Based on these specific conditions, dynamically tune the trading parameters to adapt to the current market regime.
 Keep risk management strict to prevent losses, but allow reasonable flexibility so the bot can capture valid opportunities within safe logical boundaries.
 Return ONLY valid JSON with the exact same keys as these default parameters:
-{json.dumps(state["base_params"])}
+{json.dumps(state["params"])}
 No markdown formatting, no extra text.
 """
 
@@ -859,38 +799,13 @@ No markdown formatting, no extra text.
                     raise ValueError("Groq یه پاسخ خالی برگردوند (احتمالاً توکن‌های reasoning تمام سقف max_tokens رو مصرف کردن)")
 
                 raw_params = json.loads(content)
-                state["params"] = self._anchor_to_base(symbol, self.validate_and_clamp_params(raw_params))
+                state["params"] = self.validate_and_clamp_params(raw_params)
                 state["last_optimized_time"] = datetime.now()
                 logger.info(f"پارامترهای ضد ضرر و پویای {symbol} بر اساس داده‌های روز بروزرسانی شد.")
             else:
                 logger.warning(f"Groq API برای {symbol} پاسخ {response.status_code} داد؛ پارامترهای قبلی حفظ شدن.")
         except Exception as e:
             logger.error(f"خطا در بهینه‌سازی هوش مصنوعی برای {symbol}: {e}")
-
-    def _anchor_to_base(self, symbol: str, proposed: dict) -> dict:
-        """
-        قبلاً خروجی AI مستقیم جایگزین پارامترها می‌شد و دفعه‌ی بعد AI از همون مقدار شروع
-        می‌کرد؛ یعنی هر ~۴ ساعت یه قدم راه‌رفتنِ تصادفی که جمع می‌شد (و چون ضررهای متوالی
-        هم به AI داده می‌شد، حلقه‌ی بازخورد داشت). الان: (۱) همیشه نسبت به پارامترهای پایه
-        سنجیده می‌شه، (۲) فقط کلیدهای ورودی (RSI/حجم) قابل تنظیمن مگر AI_TUNE_RISK_KEYS=true،
-        (۳) انحراف از پایه محدود و نصف‌شده (blend) اعمال می‌شه.
-        """
-        base = self.symbol_states[symbol]["base_params"]
-        entry_keys = ["rsi_buy_min", "rsi_buy_max_range_start", "rsi_buy_max_range_end", "volume_mult"]
-        risk_keys = ["atr_min_filter", "cooldown_minutes", "sl_atr_mult", "tp1_mult", "tp2_mult",
-                     "tp3_mult", "trailing_mult", "stress_pctl_threshold", "stress_size_mult"]
-        tunable = entry_keys + (risk_keys if self.config.AI_TUNE_RISK_KEYS else [])
-        out = dict(base)
-        for k in tunable:
-            b = float(base[k])
-            v = float(proposed.get(k, b))
-            if k.startswith("rsi"):
-                lo, hi = b - self.config.AI_RSI_MAX_DEVIATION_POINTS, b + self.config.AI_RSI_MAX_DEVIATION_POINTS
-            else:
-                lo, hi = b * (1 - self.config.AI_MAX_DEVIATION_PCT), b * (1 + self.config.AI_MAX_DEVIATION_PCT)
-            v = max(lo, min(hi, v))
-            out[k] = b + (v - b) * self.config.AI_BLEND
-        return self.validate_and_clamp_params(out)
 
     def get_params(self, symbol: str) -> dict:
         return self.symbol_states[symbol]["params"]
@@ -1070,158 +985,91 @@ Respond ONLY with valid JSON, no markdown, no extra text, in exactly this shape:
 # ==================== جدید: مدیریت وضعیت سراسری پرتفوی (خودتنظیمی با جوی بازار) ====================
 class PortfolioStateManager:
     """
-    لایه‌ی سراسری خودتنظیمی: NORMAL / CAUTION / DEFENSIVE.
+    لایه‌ی سراسری (سطح کل پرتفوی، نه یک نماد خاص) که وضعیت عملکرد اخیر ربات رو
+    زیر نظر می‌گیره و بر اساس اون، سخت‌گیری کل سیستم رو خودکار تنظیم می‌کنه - دقیقاً
+    برای اینکه دیگه لازم نباشه هر بار که جوی بازار عوض شد و ربات شروع به ضررده‌شدن
+    کرد، کسی دستی متوجه بشه و تنظیمات رو عوض کنه.
 
-    تغییرات نسبت به نسخه‌ی قبل:
-      1) آمار روی «معامله» حساب می‌شه نه روی هر «فیل» (TP1/TP2/نهایی جدا جدا ثبت می‌شدن و
-         نرخ برد/R رو کج می‌کردن؛ بریک‌ایون بعد از TP1 هم «باخت» حساب می‌شد).
-      2) گیر نکردن در تدافعی: تا وقتی معامله‌ی واقعی بسته نشه آمار واقعی عوض نمی‌شه، پس
-         حالت تا ابد می‌موند. الان سه راه خروج داره:
-           - معاملات مجازی پنهان (Shadow) با قوانین حالت NORMAL: اگه خوب جواب بدن، یه پله برمی‌گرده
-           - شواهد واقعیِ بهتر
-           - سقف زمانی (پشتیبان)
-      3) بعد از هر برگشت، آمار قدیمیِ بد «فراموش» می‌شه (stats_epoch) تا فوراً دوباره تدافعی نشه.
+    سه حالت:
+      NORMAL     : عملکرد اخیر سالمه - تنظیمات پیش‌فرض
+      CAUTION    : عملکرد اخیر رو به ضعفه - آستانه‌ی ورود بالاتر، حجم کمتر، کول‌داون بیشتر
+      DEFENSIVE  : ضررهای پیاپی یا expectancy منفی واضح - سخت‌گیری حداکثری + فقط روند
+                   خالص BULLISH (نه NEUTRAL) مجاز به سیگنال‌دهیه
+
+    تصمیم‌گیری اصلی صرفاً روی داده‌ی واقعی معاملات بسته‌شده‌ی خودِ ربات (ژورنال) گرفته
+    می‌شه - کاملاً محاسباتیه، هیچ هزینه‌ی Groq نداره و همیشه فعاله (حتی وقتی سهمیه‌ی
+    رایگان AI تموم شده باشه). علاوه بر این، یک ارزیابیِ کم‌تکرار و اختیاریِ AI از رژیم
+    کلی بازار می‌تونه یک ضریب تهاجمی‌بودن اضافه اعمال کنه؛ پیش‌فرضش خنثیه (۱.۰).
     """
-    RANK = {"NORMAL": 0, "CAUTION": 1, "DEFENSIVE": 2}
-    LABELS = {"NORMAL": "🟢 عادی", "CAUTION": "🟡 محتاط", "DEFENSIVE": "🔴 تدافعی"}
-
-    def __init__(self, config: Config, journal: "TradeJournal", telegram_sender, shadow_journal: Optional["TradeJournal"] = None):
+    def __init__(self, config: Config, journal: "TradeJournal", telegram_sender):
         self.config = config
         self.journal = journal
-        self.shadow_journal = shadow_journal
         self.telegram = telegram_sender
         self.state = "NORMAL"
         self.last_stats: Dict = {}
         self.ai_regime: Dict = {"market_regime": "uncertain", "aggressiveness_mult": 1.0, "reasoning": ""}
         self._last_ai_regime_time: Optional[datetime] = None
-        self.state_entered_at: datetime = datetime.now()
-        self.stats_epoch: Optional[datetime] = None
-        self._lock = threading.RLock()
-        self._state_file = config.path("portfolio_state.json")
-        self._load_state()
 
-    # ---------- ذخیره/بازیابی (تا بعد از ری‌استارت حالت و "فراموشی" حفظ بشه) ----------
-    def _save_state(self):
-        try:
-            with open(self._state_file, "w", encoding="utf-8") as f:
-                json.dump({
-                    "state": self.state,
-                    "entered_at": self.state_entered_at.isoformat(),
-                    "stats_epoch": self.stats_epoch.isoformat() if self.stats_epoch else None,
-                }, f)
-        except Exception as e:
-            logger.error(f"خطا در ذخیره‌ی وضعیت پرتفوی: {e}")
+    def _consecutive_losses_global(self) -> int:
+        count = 0
+        for r in reversed(self.journal.records):
+            if r["pnl_usdt"] <= 0:
+                count += 1
+            else:
+                break
+        return count
 
-    def _load_state(self):
-        if not os.path.exists(self._state_file):
-            return
-        try:
-            with open(self._state_file, "r", encoding="utf-8") as f:
-                d = json.load(f)
-            if d.get("state") in self.RANK:
-                self.state = d["state"]
-            if d.get("entered_at"):
-                self.state_entered_at = datetime.fromisoformat(d["entered_at"])
-            if d.get("stats_epoch"):
-                self.stats_epoch = datetime.fromisoformat(d["stats_epoch"])
-            logger.info(f"وضعیت پرتفوی از فایل بازیابی شد: {self.state}")
-        except Exception as e:
-            logger.error(f"خطا در خواندن وضعیت پرتفوی (از NORMAL شروع می‌شه): {e}")
-
-    # ---------- آمار ----------
     def get_stats(self) -> Dict:
-        results = self.journal.get_trade_results(window=self.config.PORTFOLIO_ROLLING_WINDOW, since=self.stats_epoch)
-        return summarize_trades(results)
-
-    def get_shadow_stats(self) -> Dict:
-        if self.shadow_journal is None:
-            return summarize_trades([])
-        results = self.shadow_journal.get_trade_results(window=self.config.SHADOW_RECOVERY_WINDOW, since=self.state_entered_at)
-        return summarize_trades(results)
-
-    def _classify_live(self, stats: Dict) -> Optional[str]:
-        # نمونه‌ی کم = «نمی‌دونم» (نه NORMAL)، تا حالت فعلی بی‌دلیل پریده نشه
-        if stats["sample_count"] < self.config.PORTFOLIO_MIN_SAMPLES:
-            return None
-        if (stats["consecutive_losses"] >= self.config.PORTFOLIO_CONSECUTIVE_LOSS_THRESHOLD
-                or stats["avg_r"] <= -0.3 or stats["win_rate"] < 30):
-            return "DEFENSIVE"
-        if stats["avg_r"] <= 0.05 or stats["win_rate"] < 45:
-            return "CAUTION"
-        return "NORMAL"
-
-    def _step_down(self, state: str) -> str:
-        return "CAUTION" if state == "DEFENSIVE" else "NORMAL"
+        recent = self.journal.records[-self.config.PORTFOLIO_ROLLING_WINDOW:]
+        if not recent:
+            return {"sample_count": 0, "win_rate": None, "avg_r": None, "consecutive_losses": 0}
+        wins = [r for r in recent if r["pnl_usdt"] > 0]
+        return {
+            "sample_count": len(recent),
+            "win_rate": round(len(wins) / len(recent) * 100, 1),
+            "avg_r": round(sum(r["r_multiple"] for r in recent) / len(recent), 2),
+            "consecutive_losses": self._consecutive_losses_global()
+        }
 
     def recompute(self) -> str:
-        with self._lock:
-            prev = self.state
-            stats = self.get_stats()
-            self.last_stats = stats
-            live = self._classify_live(stats)
-            shadow = self.get_shadow_stats() if prev != "NORMAL" else summarize_trades([])
-            new_state, reason = prev, None
+        prev_state = self.state
+        stats = self.get_stats()
+        self.last_stats = stats
 
-            if live is not None and self.RANK[live] > self.RANK[prev]:
-                new_state, reason = live, "live_worse"
-            elif live is not None and self.RANK[live] < self.RANK[prev]:
-                new_state, reason = live, "live_better"
-            elif prev != "NORMAL":
-                hours_in_state = (datetime.now() - self.state_entered_at).total_seconds() / 3600
-                max_hours = self.config.DEFENSIVE_MAX_HOURS if prev == "DEFENSIVE" else self.config.CAUTION_MAX_HOURS
-                shadow_ok = (
-                    shadow["sample_count"] >= self.config.SHADOW_MIN_TRADES_FOR_RECOVERY
-                    and shadow["win_rate"] >= self.config.SHADOW_RECOVERY_MIN_WIN_RATE
-                    and shadow["avg_r"] >= self.config.SHADOW_RECOVERY_MIN_AVG_R
-                )
-                if shadow_ok:
-                    new_state, reason = self._step_down(prev), "shadow"
-                elif hours_in_state >= max_hours:
-                    new_state, reason = self._step_down(prev), "timeout"
+        if stats["sample_count"] < self.config.PORTFOLIO_MIN_SAMPLES:
+            new_state = "NORMAL"
+        elif (stats["consecutive_losses"] >= self.config.PORTFOLIO_CONSECUTIVE_LOSS_THRESHOLD
+              or stats["avg_r"] <= -0.3 or stats["win_rate"] < 30):
+            new_state = "DEFENSIVE"
+        elif stats["avg_r"] <= 0.05 or stats["win_rate"] < 45:
+            new_state = "CAUTION"
+        else:
+            new_state = "NORMAL"
 
-            if new_state != prev:
-                self._apply_transition(prev, new_state, stats, shadow, reason)
-            return self.state
+        self.state = new_state
+        if new_state != prev_state:
+            self._notify_transition(prev_state, new_state, stats)
+        return self.state
 
-    def _apply_transition(self, prev: str, new: str, stats: Dict, shadow: Dict, reason: str):
-        now = datetime.now()
-        self.state = new
-        self.state_entered_at = now
-        if self.RANK[new] < self.RANK[prev]:
-            self.stats_epoch = now  # آمار قدیمیِ بد فراموش می‌شه
-        self._save_state()
-        logger.info(f"تغییر حالت پرتفوی: {prev} -> {new} (علت: {reason})")
-        try:
-            self._notify_transition(prev, new, stats, shadow, reason)
-        except Exception as e:
-            logger.error(f"خطا در ارسال پیام تغییر حالت: {e}")
-
-    def _notify_transition(self, prev_state: str, new_state: str, stats: Dict, shadow: Dict, reason: str):
-        def f(v, spec):
-            return "ندارد" if v is None else format(v, spec)
-        reasons = {
-            "live_worse": "عملکرد واقعی اخیر بدتر شد.",
-            "live_better": "عملکرد واقعی اخیر بهتر شد.",
-            "shadow": (f"معاملات مجازی پنهان نشون دادن قوانین عادی دوباره جواب می‌دن "
-                       f"({shadow['sample_count']} معامله | نرخ برد {f(shadow['win_rate'], '.0f')}% | "
-                       f"میانگین R {f(shadow['avg_r'], '+.2f')})."),
-            "timeout": "سقف زمانی ماندن در این حالت تموم شد؛ یه درجه سخت‌گیری کم شد و از اینجا با داده‌ی تازه قضاوت می‌شه.",
-        }
+    def _notify_transition(self, prev_state: str, new_state: str, stats: Dict):
+        labels = {"NORMAL": "🟢 عادی", "CAUTION": "🟡 محتاط", "DEFENSIVE": "🔴 تدافعی"}
         msg = f"""
-🧭 **تغییر خودکار حالت پرتفوی: {self.LABELS[prev_state]} ← {self.LABELS[new_state]}**
+🧭 **تغییر خودکار حالت پرتفوی: {labels.get(prev_state, prev_state)} ← {labels.get(new_state, new_state)}**
 
-علت: {reasons.get(reason, reason)}
+بر اساس {stats['sample_count']} رخداد اخیر معاملاتی (همه‌ی نمادها):
+📈 نرخ برد رولینگ: {stats['win_rate']}%
+📐 میانگین R رولینگ: {stats['avg_r']:+.2f}R
+🔻 ضررهای متوالی فعلی (سراسری): {stats['consecutive_losses']}
 
-آمار واقعی (بر اساس معامله، نه هر فیل) - {stats['sample_count']} معامله:
-📈 نرخ برد: {f(stats['win_rate'], '.1f')}% | 📐 میانگین R: {f(stats['avg_r'], '+.2f')} | 🔻 ضرر متوالی: {stats['consecutive_losses']}
 """
         if new_state == "DEFENSIVE":
-            msg += ("\nآستانه‌ی ورود و حداقل اطمینان AI بالا رفت، حجم نصف شد و فقط روند خالص صعودی مجازه. "
-                    "همزمان معاملات مجازی پنهان با قوانین عادی اجرا می‌شن تا ربات خودش بفهمه کی بازار دوباره مناسب شده.")
+            msg += ("ربات وارد حالت تدافعی شد: آستانه‌ی امتیاز ورود و حداقل اطمینان AI بالاتر رفت، حجم پوزیشن کاهش "
+                    "یافت و فقط روند خالص صعودی (نه خنثی) مجاز به سیگنال‌دهیه. این یعنی روش فعلی در جوی فعلی بازار "
+                    "داره ضرر می‌ده و ربات خودش سخت‌گیرتر شد - بدون نیاز به دخالت دستی. تا بهبود عملکرد رولینگ ادامه پیدا می‌کنه.")
         elif new_state == "CAUTION":
-            msg += "\nسخت‌گیری کمی بیشتر و حجم کمتر؛ معاملات مجازی پنهان برای تشخیص برگشت به حالت عادی ادامه دارن." if reason in ("live_worse",) else "\nیه پله سخت‌گیری کمتر شد؛ هنوز حجم/آستانه کمی محتاطانه‌ست."
+            msg += "ربات وارد حالت محتاط شد: سخت‌گیری کمی بیشتر و حجم کمتر تا روشن‌ترشدن جهت بازار."
         else:
-            msg += "\nسخت‌گیری اضافه برداشته شد و ربات به تنظیمات عادی برگشت."
+            msg += "عملکرد اخیر به حالت سالم برگشت - سخت‌گیری اضافه‌ی حالت قبلی برداشته شد و ربات به تنظیمات عادی برگشت."
         self.telegram.send_personal_message(msg)
 
     def should_refresh_ai_regime(self) -> bool:
@@ -1233,11 +1081,6 @@ class PortfolioStateManager:
         self._last_ai_regime_time = datetime.now()
         if result:
             self.ai_regime = result
-
-    def get_normal_adjustments(self) -> Dict:
-        """تنظیمات حالت NORMAL (برای تولید سیگنال‌های مجازی پنهان)"""
-        return {"score_adjustment": 0.0, "confidence_adjustment": 0, "size_mult": 1.0, "cooldown_mult": 1.0,
-                "defensive": False, "state": "NORMAL", "ai_market_regime": (self.ai_regime or {}).get("market_regime")}
 
     def get_adjustments(self) -> Dict:
         presets = {
@@ -1285,12 +1128,10 @@ class SignalEngine:
         return score
 
     def get_rule_signal(self, symbol: str, df_15m: pd.DataFrame, df_1h: pd.DataFrame, trend_4h: str,
-                         macro_context: Optional[dict] = None, portfolio_adjustments: Optional[dict] = None,
-                         quiet: bool = False) -> Tuple[Optional[str], dict]:
+                         macro_context: Optional[dict] = None, portfolio_adjustments: Optional[dict] = None) -> Tuple[Optional[str], dict]:
         if df_15m.empty or len(df_15m) < 30:
             return None, {}
 
-        log_info = logger.debug if quiet else logger.info
         pctl = self.analysis.atr_percentile(df_15m)
 
         if self.ai_optimizer.is_blacklisted(symbol, current_pctl=pctl):
@@ -1322,33 +1163,14 @@ class SignalEngine:
         btc_aligned_now = symbol != "BTC/USDT" and bool(btc_trend_4h) and btc_trend_4h == trend_4h and btc_trend_4h != "NEUTRAL"
 
         if spread_pct is not None and spread_pct > 0.8:
-            log_info(f"{symbol}: اسپرد لحظه‌ای غیرعادی ({spread_pct:.2f}%) - سیگنال رد شد")
+            logger.info(f"{symbol}: اسپرد لحظه‌ای غیرعادی ({spread_pct:.2f}%) - سیگنال رد شد")
             return None, {}
 
         if pctl > self.config.ATR_PERCENTILE_MAX:
-            log_info(f"{symbol}: نوسان غیرعادی (پرسنتایل {pctl:.0f}) - رد شد")
+            logger.info(f"{symbol}: نوسان غیرعادی (پرسنتایل {pctl:.0f}) - رد شد")
             return None, {}
 
         structure = self.analysis.market_structure(df_15m)
-
-        # ---- جدید: گارد ریزش بیت‌کوین ----
-        # فیلتر 4h با تأخیر زیاد (EMA200) تا مدتی بعد از ریزش هم BULLISH می‌مونه؛ این گارد
-        # جلوی «خرید در ریزش» رو می‌گیره (طلای PAXG مستثناست).
-        if self.config.BTC_CRASH_GUARD and symbol != "PAXG/USDT" and macro_context.get("btc_falling"):
-            return None, {}
-
-        # ---- جدید: شروط سخت ورود (قبلاً فقط امتیاز می‌گرفتن و با شرایط «حالتی» و کند، امتیاز
-        # بدون هیچ محرک ورودی به آستانه می‌رسید) ----
-        if self.config.ENTRY_HARD_GATES:
-            if not self.analysis.is_mtf_aligned(df_1h, "BUY"):
-                return None, {}
-            if latest['close'] < latest['ema_slow']:
-                return None, {}
-            cur_hist, prev_hist = latest.get('macd_hist', float('nan')), prev.get('macd_hist', float('nan'))
-            momentum_up = bool(latest['rsi'] > prev['rsi']) or (
-                not pd.isna(cur_hist) and not pd.isna(prev_hist) and cur_hist > prev_hist)
-            if not momentum_up:
-                return None, {}
 
         # ---- فقط پوزیشن Long/BUY (اسپات) ----
         # در حالت DEFENSIVE پرتفوی (چند ضرر متوالی/expectancy منفی)، حالت NEUTRAL+ساختار
@@ -1443,7 +1265,7 @@ class SignalEngine:
                      f"portfolio_state={diagnostics['portfolio_state']}")
         if buy_score >= threshold:
             diagnostics["quant_score"] = round(buy_score, 2)
-            log_info(f"{symbol}: امتیاز خرید {buy_score:.2f} (آستانه {threshold}) | ساختار: {structure} | {macro_log}")
+            logger.info(f"{symbol}: امتیاز خرید {buy_score:.2f} (آستانه {threshold}) | ساختار: {structure} | {macro_log}")
             return "BUY", diagnostics
 
         return None, {}
@@ -1516,29 +1338,8 @@ class RiskManager:
             return 0.0
         return risk_amount / risk_per_unit
 
-    def build_levels(self, p: dict, side: str, latest) -> Dict:
-        """همون فرمول SL/TP تلگرام (برای معاملات مجازی پنهان که پیام نمی‌فرستن)"""
-        price = float(latest['close'])
-        atr = float(latest['atr']) if not pd.isna(latest['atr']) else price * 0.01
-        if side == "BUY":
-            sl = min(float(latest['support']), price - (p["sl_atr_mult"] * atr))
-            risk = price - sl
-            tps = [round(price + m * risk, 4) for m in (p["tp1_mult"], p["tp2_mult"], p["tp3_mult"])]
-        else:
-            sl = max(float(latest['resistance']), price + (p["sl_atr_mult"] * atr))
-            risk = sl - price
-            tps = [round(price - m * risk, 4) for m in (p["tp1_mult"], p["tp2_mult"], p["tp3_mult"])]
-        return {"price": price, "sl": round(sl, 4), "tp1": tps[0], "tp2": tps[1], "tp3": tps[2], "atr": atr, "risk": risk}
-
     def can_open_trade(self, symbol: str, active_trades: Dict, correlation_manager: Optional["CorrelationManager"] = None,
                         btc_volatility_pctl: Optional[float] = None) -> Tuple[bool, str]:
-        # جدید: قبلاً همون نماد می‌تونست بعد از کول‌داون دوباره (روی پوزیشن باز) خرید بشه و
-        # MAX_CONCURRENT_TRADES هم هیچ‌جا اعمال نمی‌شد.
-        if self.config.STRICT_POSITION_RULES:
-            if any(t.get('symbol') == symbol for t in active_trades.values()):
-                return False, "برای همین نماد یه معامله‌ی باز داریم (جلوگیری از پوزیشن تکراری)"
-            if len(active_trades) >= self.config.MAX_CONCURRENT_TRADES:
-                return False, f"به سقف معاملات هم‌زمان ({self.config.MAX_CONCURRENT_TRADES}) رسیدیم"
         if correlation_manager is not None:
             threshold = correlation_manager.get_dynamic_threshold(btc_volatility_pctl)
             corr_count = correlation_manager.correlated_count(symbol, active_trades, threshold)
@@ -1556,23 +1357,6 @@ class RiskManager:
         return True, ""
 
 # ==================== ژورنال معاملات ====================
-def summarize_trades(results: List[Dict]) -> Dict:
-    if not results:
-        return {"sample_count": 0, "win_rate": None, "avg_r": None, "consecutive_losses": 0}
-    wins = [x for x in results if x["pnl"] > 0]
-    consecutive = 0
-    for x in reversed(results):
-        if x["pnl"] <= 0:
-            consecutive += 1
-        else:
-            break
-    return {
-        "sample_count": len(results),
-        "win_rate": round(len(wins) / len(results) * 100, 1),
-        "avg_r": round(sum(x["r"] for x in results) / len(results), 2),
-        "consecutive_losses": consecutive,
-    }
-
 class TradeJournal:
     def __init__(self, path: str = "trade_history.json"):
         self.path = path
@@ -1594,8 +1378,7 @@ class TradeJournal:
         except Exception as e:
             logger.error(f"خطا در ذخیره ژورنال معاملات: {e}")
 
-    def record(self, symbol: str, side: str, reason: str, pnl_usdt: float, pnl_pct: float, r_multiple: float, closed_pct: float,
-               trade_id: Optional[str] = None):
+    def record(self, symbol: str, side: str, reason: str, pnl_usdt: float, pnl_pct: float, r_multiple: float, closed_pct: float):
         self.records.append({
             "date": date_cls.today().isoformat(),
             "timestamp": datetime.now().isoformat(),
@@ -1605,28 +1388,9 @@ class TradeJournal:
             "pnl_usdt": round(pnl_usdt, 2),
             "pnl_pct": round(pnl_pct, 3),
             "r_multiple": round(r_multiple, 2),
-            "closed_pct": closed_pct,
-            "trade_id": trade_id
+            "closed_pct": closed_pct
         })
         self._save()
-
-    def get_trade_results(self, window: Optional[int] = None, since: Optional[datetime] = None) -> List[Dict]:
-        """رکوردهای جزئی (TP1/TP2/نهایی) رو به ازای هر معامله جمع می‌کنه. R وزن‌دار با درصد بسته‌شده."""
-        groups: Dict[str, Dict] = {}
-        for idx, r in enumerate(self.records):
-            try:
-                ts = datetime.fromisoformat(r["timestamp"])
-            except Exception:
-                continue
-            if since is not None and ts < since:
-                continue
-            key = r.get("trade_id") or f"legacy_{idx}"
-            g = groups.setdefault(key, {"pnl": 0.0, "r": 0.0, "ts": ts})
-            g["pnl"] += r["pnl_usdt"]
-            g["r"] += r["r_multiple"] * (r.get("closed_pct", 100) / 100.0)
-            g["ts"] = max(g["ts"], ts)
-        results = sorted(groups.values(), key=lambda x: x["ts"])
-        return results[-window:] if window else results
 
     def get_today_realized_pnl_usdt(self) -> float:
         today = date_cls.today().isoformat()
@@ -1709,15 +1473,13 @@ class TradeJournal:
 # ==================== ماژول معامله مجازی ====================
 class PaperTrader:
     def __init__(self, config: Config, telegram_sender, ai_optimizer: AIParameterOptimizer, journal: TradeJournal,
-                 portfolio_state: Optional["PortfolioStateManager"] = None,
-                 file_path: str = "paper_trades.json", silent: bool = False):
+                 portfolio_state: Optional["PortfolioStateManager"] = None):
         self.config = config
-        self.silent = silent  # True = معامله‌ی مجازی پنهان (بدون تلگرام/بدون اثر روی بلک‌لیست)
         self.telegram = telegram_sender
         self.ai_optimizer = ai_optimizer
         self.journal = journal
         self.portfolio_state = portfolio_state
-        self.file_path = file_path
+        self.file_path = "paper_trades.json"
         self.active_trades = self._load_trades()
         self.lock = threading.Lock()
 
@@ -1797,7 +1559,6 @@ class PaperTrader:
         trade_id = f"{symbol}_{int(time.time())}"
         with self.lock:
             self.active_trades[trade_id] = {
-                "trade_id": trade_id,
                 "symbol": symbol,
                 "side": side,
                 "entry": entry_price,
@@ -1834,14 +1595,13 @@ class PaperTrader:
         pnl_usdt = price_diff * qty_closed
         pnl_pct = (price_diff / entry) * 100
 
-        if register_result and not self.silent:
+        if register_result:
             if price_diff > 0:
                 self.ai_optimizer.register_win(trade['symbol'])
             else:
                 self.ai_optimizer.register_loss(trade['symbol'])
 
-        self.journal.record(trade['symbol'], side, reason, pnl_usdt, pnl_pct, r_multiple, closed_pct,
-                            trade_id=trade.get("trade_id"))
+        self.journal.record(trade['symbol'], side, reason, pnl_usdt, pnl_pct, r_multiple, closed_pct)
 
         # بلافاصله بعد از ثبت هر رخداد، وضعیت سراسری پرتفوی بازمحاسبه می‌شه - یعنی سیستم
         # همون لحظه (نه فقط در چرخه‌ی ۵ دقیقه‌ای بعدی) می‌تونه وارد حالت CAUTION/DEFENSIVE
@@ -1851,9 +1611,6 @@ class PaperTrader:
                 self.portfolio_state.recompute()
             except Exception as e:
                 logger.error(f"خطا در بازمحاسبه‌ی وضعیت پرتفوی: {e}")
-
-        if self.silent:
-            return
 
         emoji = "✅" if pnl_usdt > 0 else ("⚪" if pnl_usdt == 0 else "❌")
         msg = f"""
@@ -2065,14 +1822,9 @@ class HybridTradingSystem:
         self.signal_engine = SignalEngine(self.config, self.ai_optimizer, self.analysis)
         self.risk_manager = RiskManager(self.config)
         self.telegram = TelegramSender(self.config, self.ai_optimizer, self.risk_manager)
-        self.journal = TradeJournal(self.config.path("trade_history.json"))
-        self.shadow_journal = TradeJournal(self.config.path("shadow_history.json"))
-        self.portfolio_state = PortfolioStateManager(self.config, self.journal, self.telegram, shadow_journal=self.shadow_journal)
-        self.paper_trader = PaperTrader(self.config, self.telegram, self.ai_optimizer, self.journal, self.portfolio_state,
-                                        file_path=self.config.path("paper_trades.json"))
-        self.shadow_trader = PaperTrader(self.config, self.telegram, self.ai_optimizer, self.shadow_journal, self.portfolio_state,
-                                         file_path=self.config.path("shadow_trades.json"), silent=True)
-        self.last_shadow_time: Dict[str, datetime] = {}
+        self.journal = TradeJournal()
+        self.portfolio_state = PortfolioStateManager(self.config, self.journal, self.telegram)
+        self.paper_trader = PaperTrader(self.config, self.telegram, self.ai_optimizer, self.journal, self.portfolio_state)
         self.correlation_manager = CorrelationManager(self.config, self.data)
         self.ai_optimizer.on_quota_exhausted_callback = self._send_crash_alert
         self.running = True
@@ -2095,11 +1847,6 @@ class HybridTradingSystem:
                 except Exception as e:
                     logger.error(f"خطا در ترد مانیتورینگ لحظه‌ای معاملات: {e}")
                     self._send_crash_alert(f"خطا در ترد مانیتورینگ معاملات باز:\n`{e}`")
-                if self.config.SHADOW_ENABLED:
-                    try:
-                        self.shadow_trader.update_and_check_trades(self.data)
-                    except Exception as e:
-                        logger.error(f"خطا در مانیتورینگ معاملات مجازی پنهان: {e}")
                 time.sleep(self.config.TRADE_MONITOR_INTERVAL_SECONDS)
 
         threading.Thread(target=monitor_loop, daemon=True, name="TradeMonitor").start()
@@ -2107,8 +1854,7 @@ class HybridTradingSystem:
 
     def _build_macro_context(self) -> dict:
         context = {"fear_greed": None, "btc_trend_4h": None, "btc_structure": None, "btc_volatility_pctl": None,
-                   "btc_reference_trade": None, "btc_rsi": None, "btc_macd_hist": None,
-                   "btc_ret_4h_pct": None, "btc_falling": False}
+                   "btc_reference_trade": None, "btc_rsi": None, "btc_macd_hist": None}
         try:
             context["fear_greed"] = self.macro_data.get_fear_greed_index()
         except Exception as e:
@@ -2134,60 +1880,10 @@ class HybridTradingSystem:
                     context["btc_rsi"] = float(btc_latest['rsi'])
                 if not pd.isna(btc_latest.get('macd_hist', float('nan'))):
                     context["btc_macd_hist"] = float(btc_latest['macd_hist'])
-                if len(btc_df_15m) >= 17:
-                    context["btc_ret_4h_pct"] = (float(btc_df_15m['close'].iloc[-1]) / float(btc_df_15m['close'].iloc[-17]) - 1) * 100
-
-            falling_reasons = []
-            ret4 = context.get("btc_ret_4h_pct")
-            if ret4 is not None and ret4 <= -self.config.BTC_CRASH_DROP_PCT_4H:
-                falling_reasons.append(f"افت {ret4:.2f}% در ۴ ساعت")
-            if (context["btc_rsi"] is not None and context["btc_macd_hist"] is not None
-                    and context["btc_rsi"] < self.config.BTC_CRASH_RSI_MAX and context["btc_macd_hist"] < 0):
-                falling_reasons.append(f"RSI={context['btc_rsi']:.0f} با MACD منفی")
-            if falling_reasons:
-                context["btc_falling"] = True
-                if self.config.BTC_CRASH_GUARD:
-                    logger.info("گارد ریزش بیت‌کوین فعال: " + " | ".join(falling_reasons) + " - ورود جدید (به‌جز PAXG) ممنوع")
         except Exception as e:
             logger.warning(f"خطا در ساخت زمینه‌ی کلان بیت‌کوین: {e}")
 
         return context
-
-    def _maybe_open_shadow_trade(self, symbol: str, df_15m, df_1h, trend_4h: str, symbol_ctx: dict, macro_context: Optional[dict]):
-        """
-        وقتی حالت پرتفوی NORMAL نیست: اگه با قوانین «حالت عادی» سیگنال خرید می‌اومد، یه معامله‌ی
-        مجازی پنهان باز می‌کنیم (بدون تلگرام، بدون قضاوت AI/مصرف سهمیه، بدون اثر روی بلک‌لیست).
-        نتیجه‌ش فقط برای تشخیص «کی بازار دوباره به استراتژی جواب می‌ده» استفاده می‌شه.
-        """
-        try:
-            shadow_active = self.shadow_trader.snapshot_active_trades()
-            if len(shadow_active) >= self.config.SHADOW_MAX_OPEN:
-                return
-            p = self.ai_optimizer.get_params(symbol)
-            now = datetime.now()
-            last = self.last_shadow_time.get(symbol)
-            if last and now - last < timedelta(minutes=p.get("cooldown_minutes", 90)):
-                return
-            signal, _ = self.signal_engine.get_rule_signal(
-                symbol, df_15m, df_1h, trend_4h, symbol_ctx, self.portfolio_state.get_normal_adjustments(), quiet=True)
-            if signal != "BUY":
-                return
-            can_open, _ = self.risk_manager.can_open_trade(
-                symbol, shadow_active, correlation_manager=self.correlation_manager,
-                btc_volatility_pctl=(macro_context or {}).get("btc_volatility_pctl"))
-            if not can_open:
-                return
-            lv = self.risk_manager.build_levels(p, signal, df_15m.iloc[-1])
-            if lv["risk"] <= 0:
-                return
-            qty = self.risk_manager.calculate_position_size(lv["price"], lv["sl"], 1.0)
-            self.shadow_trader.open_virtual_trade(
-                symbol=symbol, side=signal, entry_price=lv["price"], tp1=lv["tp1"], tp2=lv["tp2"], tp3=lv["tp3"],
-                sl=lv["sl"], qty=qty, atr_at_entry=lv["atr"], spread_pct_at_entry=symbol_ctx.get("spread_pct"))
-            self.last_shadow_time[symbol] = now
-            logger.info(f"[سایه] معامله‌ی مجازی پنهان باز شد: {symbol} @ {lv['price']}")
-        except Exception as e:
-            logger.error(f"خطا در باز کردن معامله‌ی مجازی پنهان {symbol}: {e}")
 
     def process_symbol(self, symbol: str, macro_context: Optional[dict] = None) -> bool:
         try:
@@ -2214,9 +1910,6 @@ class HybridTradingSystem:
             # وضعیت خودکار پرتفوی همین الان می‌گیریم - قبلاً هم در run_once و هم بعد از
             # هر بسته‌شدن معامله بازمحاسبه شده، پس همیشه به‌روزه.
             portfolio_adjustments = self.portfolio_state.get_adjustments()
-
-            if self.config.SHADOW_ENABLED and portfolio_adjustments.get("state") != "NORMAL":
-                self._maybe_open_shadow_trade(symbol, df_15m, df_1h, trend_4h, symbol_macro_context, macro_context)
 
             rule_signal, diagnostics = self.signal_engine.get_rule_signal(
                 symbol, df_15m, df_1h, trend_4h, symbol_macro_context, portfolio_adjustments
