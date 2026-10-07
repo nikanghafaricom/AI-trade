@@ -96,8 +96,8 @@ class Config:
     TREND_TIMEFRAME = "4h"
     CHECK_INTERVAL = 300
 
-    MIN_SIGNAL_SCORE = 7.7
-    ATR_PERCENTILE_MAX = 96
+    MIN_SIGNAL_SCORE = 7.4
+    ATR_PERCENTILE_MAX = 98.5
 
     VIRTUAL_CAPITAL_USDT = float(os.getenv("VIRTUAL_CAPITAL_USDT", 10000))
     RISK_PER_TRADE_PCT = float(os.getenv("RISK_PER_TRADE_PCT", 1.5))
@@ -568,7 +568,7 @@ class AIParameterOptimizer:
             "rsi_sell_max": 58,
             "rsi_sell_min_range_start": 35,
             "rsi_sell_min_range_end": 52,
-            "volume_mult": 1.05,
+            "volume_mult": 0.95,
             "atr_min_filter": 0.0014,
             "cooldown_minutes": 85,
             "sl_atr_mult": 1.7,
@@ -653,7 +653,7 @@ class AIParameterOptimizer:
         clamped["rsi_sell_min_range_start"] = max(25, min(float(new_params.get("rsi_sell_min_range_start", 35)), 45))
         clamped["rsi_sell_min_range_end"] = max(40, min(float(new_params.get("rsi_sell_min_range_end", 52)), 60))
 
-        clamped["volume_mult"] = max(0.80, min(float(new_params.get("volume_mult", 1.05)), 1.7))
+        clamped["volume_mult"] = max(0.70, min(float(new_params.get("volume_mult", 0.95)), 1.7))
         clamped["atr_min_filter"] = max(0.0008, min(float(new_params.get("atr_min_filter", 0.0014)), 0.004))
         clamped["cooldown_minutes"] = max(50, min(int(new_params.get("cooldown_minutes", 85)), 220))
 
@@ -1163,16 +1163,16 @@ class SignalEngine:
             elif latest['macd_hist'] > prev.get('macd_hist', 0):
                 score += 0.5
 
-        # حجم (منعطف‌تر تا در بازارهای کم‌حجم هم فرصت از دست نره)
+        # حجم (خیلی منعطف‌تر برای شرایط فعلی بازار)
         vol_ratio = latest['volume'] / latest['vol_sma'] if latest['vol_sma'] else 0
         if vol_ratio >= p["volume_mult"] * 1.2:
             score += 1.9
         elif vol_ratio >= p["volume_mult"]:
             score += 1.3
-        elif vol_ratio >= p["volume_mult"] * 0.8:
-            score += 0.8
-        elif vol_ratio >= 0.7:
-            score += 0.3  # حجم ضعیف ولی کامل رد نشه
+        elif vol_ratio >= 0.75:
+            score += 0.7
+        elif vol_ratio >= 0.55:
+            score += 0.35
         else:
             return 0.0
 
@@ -1244,18 +1244,20 @@ class SignalEngine:
             # حالت تدافعی: فقط ستاپ تمیز
             if trend_4h == "BULLISH" and structure == "BULLISH" and mtf_ok:
                 buy_score = self._score_buy(latest, prev, p)
+            elif trend_4h == "BULLISH" and mtf_ok:
+                buy_score = self._score_buy(latest, prev, p) * 0.80
             else:
                 buy_score = 0.0
         else:
-            # حالت عادی و محتاط: اجازه بده در بازار مختلط هم فرصت‌های کوچک بگیره
+            # حالت عادی: بازتر برای شرایط نوسانی فعلی
             if trend_4h == "BULLISH" and structure == "BULLISH":
                 buy_score = self._score_buy(latest, prev, p)
-            elif trend_4h == "BULLISH" and structure == "NEUTRAL":
-                buy_score = self._score_buy(latest, prev, p) * 0.92
+            elif trend_4h == "BULLISH":
+                buy_score = self._score_buy(latest, prev, p) * 0.90
             elif trend_4h == "NEUTRAL" and structure == "BULLISH":
-                buy_score = self._score_buy(latest, prev, p) * (0.90 if mtf_ok else 0.78)
-            elif trend_4h == "NEUTRAL" and structure == "NEUTRAL" and mtf_ok:
-                buy_score = self._score_buy(latest, prev, p) * 0.70  # فرصت محدود در رنج کامل
+                buy_score = self._score_buy(latest, prev, p) * (0.88 if mtf_ok else 0.75)
+            elif trend_4h == "NEUTRAL" and mtf_ok:
+                buy_score = self._score_buy(latest, prev, p) * 0.72
             else:
                 buy_score = 0.0
 
