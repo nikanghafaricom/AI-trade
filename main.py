@@ -328,7 +328,7 @@ class AnalysisLayer:
         if pd.isna(latest['volume']) or pd.isna(latest['vol_sma']) or latest['vol_sma'] == 0:
             return False
         volume_ratio = latest['volume'] / latest['vol_sma']
-        if volume_ratio < 0.6:
+        if volume_ratio < 0.45:
             return False
         return True
 
@@ -1225,14 +1225,14 @@ class RegimeEngine:
     REGIME_MIN_DWELL_MINUTES دقیقه دوام آورده باشه. یعنی نوسان‌های الکی تغییر رژیم حساب نمی‌شن.
     """
     PROFILES = {
-        "BULL":     {"min_score": 58, "size_mult": 1.00, "tp1_mult": 1.0, "max_concurrent": 4, "label": "🟢 صعودی"},
-        "NEUTRAL":  {"min_score": 66, "size_mult": 0.85, "tp1_mult": 1.0, "max_concurrent": 3, "label": "🟡 خنثی/رنج"},
-        "WEAK":     {"min_score": 74, "size_mult": 0.60, "tp1_mult": 0.9, "max_concurrent": 2, "label": "🟠 ضعیف"},
-        "VOLATILE": {"min_score": 78, "size_mult": 0.50, "tp1_mult": 0.9, "max_concurrent": 2, "label": "🔴 پرنوسان"},
+        "BULL":     {"min_score": 55, "size_mult": 1.00, "tp1_mult": 1.0, "max_concurrent": 4, "label": "🟢 صعودی"},
+        "NEUTRAL":  {"min_score": 61, "size_mult": 0.85, "tp1_mult": 1.0, "max_concurrent": 3, "label": "🟡 خنثی/رنج"},
+        "WEAK":     {"min_score": 67, "size_mult": 0.60, "tp1_mult": 0.9, "max_concurrent": 2, "label": "🟠 ضعیف"},
+        "VOLATILE": {"min_score": 72, "size_mult": 0.50, "tp1_mult": 0.9, "max_concurrent": 2, "label": "🔴 پرنوسان"},
     }
     DEFAULT_TUNING = {
         "score_delta": 0, "size_mult": 1.0, "tp1_delta": 0.0,
-        "pullback_enabled": True, "breakout_enabled": True, "breakout_min_volume_ratio": 1.5,
+        "pullback_enabled": True, "breakout_enabled": True, "breakout_min_volume_ratio": 1.3,
     }
 
     def __init__(self, config: Config):
@@ -1361,17 +1361,19 @@ class SignalEngine:
         trend4_ok = bool(l4["close"] > l4["ema_slow"] and l4["ema_fast"] > l4["ema_slow"])
         strong4 = bool(trend4_ok and l4["close"] > l4["ema_trend"])
         h1_ok = bool(l1["close"] > l1["ema_slow"] and l1["ema_fast"] > l1["ema_slow"])
-        if not trend4_ok:
-            return self._rej("روند ۴ساعته صعودی نیست")
-        if not h1_ok:
-            return self._rej("روند ۱ساعته صعودی نیست")
+        down4 = bool(l4["close"] < l4["ema_slow"] and l4["ema_fast"] < l4["ema_slow"])
+        if down4:
+            return self._rej("روند ۴ساعته به‌وضوح نزولی است")
+        h1_recovering = bool(l1["close"] > l1["ema_fast"] and l1["ema_fast"] > df1h["ema_fast"].iloc[-4])
+        if not (h1_ok or h1_recovering):
+            return self._rej("۱ساعته هنوز برنگشته")
 
         regime = self.regime.current
         prof = self.regime.profile()
         tuning = self.regime.ai_tuning
         rs = ctx.get("rs_vs_btc")
         if regime in ("WEAK", "VOLATILE") and symbol not in ("BTC/USDT", "PAXG/USDT"):
-            if rs is None or rs < 0.3:
+            if rs is None or rs < -0.3:
                 return self._rej("در بازار ضعیف، ارز قوی‌تر از بیت‌کوین نیست")
 
         rng = float(latest["high"] - latest["low"])
@@ -1387,20 +1389,20 @@ class SignalEngine:
         setup, raw_sl = None, None
         if tuning.get("pullback_enabled", True):
             look = df15.iloc[-13:-1]
-            touched = bool((look["low"] <= look["ema_slow"] + 0.3 * atr).any() or look["rsi"].min() <= 45)
+            touched = bool((look["low"] <= look["ema_slow"] + 0.5 * atr).any() or look["rsi"].min() <= 48)
             broken = bool((df15["close"].iloc[-7:-1] < df15["ema_slow"].iloc[-7:-1] - 0.5 * atr).any())
-            trigger = bullish and close > float(prev["high"]) and close > float(latest["ema_fast"]) and close_pos >= 0.6
-            rsi_ok = 45 <= rsi <= 66 and rsi > prev_rsi
-            if touched and not broken and trigger and rsi_ok and ext <= 1.3 and vol_ratio >= 0.9:
+            trigger = bullish and close > float(prev["high"]) and close > float(latest["ema_fast"]) and close_pos >= 0.55
+            rsi_ok = 42 <= rsi <= 68 and rsi > prev_rsi
+            if touched and not broken and trigger and rsi_ok and ext <= 1.6 and vol_ratio >= 0.7:
                 setup = "PULLBACK"
                 raw_sl = float(df15["low"].iloc[-10:].min()) - 0.15 * atr
         if setup is None and tuning.get("breakout_enabled", True):
             hh = float(df15["high"].iloc[-21:-1].max())
             ll = float(df15["low"].iloc[-21:-1].min())
-            vmin = float(tuning.get("breakout_min_volume_ratio", 1.5))
+            vmin = float(tuning.get("breakout_min_volume_ratio", 1.3))
             body = close - float(latest["open"])
-            if (close > hh and body >= 0.5 * rng and close_pos >= 0.7 and vol_ratio >= vmin
-                    and (hh - ll) <= 7 * atr and ext <= 2.0 and (close - hh) <= 0.8 * atr and 52 <= rsi <= 72):
+            if (close > hh and body >= 0.4 * rng and close_pos >= 0.65 and vol_ratio >= vmin
+                    and (hh - ll) <= 9 * atr and ext <= 2.4 and (close - hh) <= 1.0 * atr and 50 <= rsi <= 74):
                 setup = "BREAKOUT"
                 raw_sl = min(hh - 0.5 * atr, float(latest["low"]) - 0.1 * atr)
         if setup is None:
@@ -1415,8 +1417,8 @@ class SignalEngine:
             return self._rej("ریسک درصدی بیش از حد")
         sl = close - dist
 
-        score = 18.0 if strong4 else 10.0
-        if float(l1["ema_fast"]) > float(df1h["ema_fast"].iloc[-4]):
+        score = 18.0 if strong4 else (10.0 if trend4_ok else 4.0)
+        if h1_ok and float(l1["ema_fast"]) > float(df1h["ema_fast"].iloc[-4]):
             score += 4.0
         score += {"BULL": 12.0, "NEUTRAL": 6.0}.get(regime, 0.0)
         if rs is not None:
