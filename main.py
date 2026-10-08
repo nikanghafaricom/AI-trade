@@ -96,7 +96,7 @@ class Config:
     TREND_TIMEFRAME = "4h"
     CHECK_INTERVAL = 300
 
-    MIN_SIGNAL_SCORE = 7.4
+    MIN_SIGNAL_SCORE = 7.2
     ATR_PERCENTILE_MAX = 98.5
 
     VIRTUAL_CAPITAL_USDT = float(os.getenv("VIRTUAL_CAPITAL_USDT", 10000))
@@ -1176,22 +1176,22 @@ class SignalEngine:
         else:
             return 0.0
 
-        # نزدیکی به حمایت یا EMA (ورود پولبک، نه تعقیب) - خیلی مهم برای کاهش استاپ‌اوت
-        near_support = latest['support'] > 0 and (latest['close'] - latest['support']) / latest['close'] < 0.018
-        near_ema = abs(latest['close'] - latest['ema_fast']) / latest['close'] < 0.012
+        # نزدیکی به حمایت یا EMA (ترجیح پولبک، اما کامل رد نمی‌کند)
+        near_support = latest['support'] > 0 and (latest['close'] - latest['support']) / latest['close'] < 0.02
+        near_ema = abs(latest['close'] - latest['ema_fast']) / latest['close'] < 0.015
         if near_support or near_ema:
-            score += 1.5
-        elif latest['close'] > latest['ema_fast'] and (latest['close'] - latest['ema_fast']) / latest['close'] < 0.025:
-            score += 0.6
+            score += 1.4
+        elif latest['close'] > latest['ema_fast'] and (latest['close'] - latest['ema_fast']) / latest['close'] < 0.03:
+            score += 0.7
         else:
-            # اگر خیلی از EMA و حمایت دور باشد، جریمه سنگین (تعقیب قیمت)
-            score -= 1.2
+            # جریمه ملایم‌تر برای تعقیب (دیگر کامل نابود نمی‌کند)
+            score -= 0.6
 
         # جریمه ورود دیرهنگام
-        if latest['rsi'] > 66:
-            score -= 1.1
-        elif latest['rsi'] > 62:
-            score -= 0.5
+        if latest['rsi'] > 67:
+            score -= 0.9
+        elif latest['rsi'] > 63:
+            score -= 0.4
 
         return score
 
@@ -1323,10 +1323,12 @@ class SignalEngine:
 
         # جریمه ضررهای متوالی همان نماد (جلوگیری از ورودهای ضعیف پشت‌سرهم)
         consec = self.ai_optimizer.symbol_states.get(symbol, {}).get("consecutive_losses", 0)
-        if consec >= 2:
-            buy_score -= 1.5
+        if consec >= 3:
+            buy_score -= 1.4
+        elif consec >= 2:
+            buy_score -= 0.9
         elif consec >= 1:
-            buy_score -= 0.7
+            buy_score -= 0.4
 
         # آستانه‌ی پویا: در حالت CAUTION/DEFENSIVE سخت‌گیرتر می‌شه
         threshold = self.config.MIN_SIGNAL_SCORE + score_adjustment
