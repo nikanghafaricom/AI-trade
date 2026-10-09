@@ -96,15 +96,15 @@ class Config:
     TREND_TIMEFRAME = "4h"
     CHECK_INTERVAL = 300
 
-    MIN_SIGNAL_SCORE = 6.9
-    ATR_PERCENTILE_MAX = 98.5
+    MIN_SIGNAL_SCORE = 6.5
+    ATR_PERCENTILE_MAX = 99.0
 
     VIRTUAL_CAPITAL_USDT = float(os.getenv("VIRTUAL_CAPITAL_USDT", 10000))
     RISK_PER_TRADE_PCT = float(os.getenv("RISK_PER_TRADE_PCT", 1.5))
     MAX_CONCURRENT_TRADES = int(os.getenv("MAX_CONCURRENT_TRADES", 4))
     MAX_TRADES_PER_GROUP = int(os.getenv("MAX_TRADES_PER_GROUP", 2))
 
-    MIN_JUDGE_CONFIDENCE = int(os.getenv("MIN_JUDGE_CONFIDENCE", 52))
+    MIN_JUDGE_CONFIDENCE = int(os.getenv("MIN_JUDGE_CONFIDENCE", 50))
 
     # ---- کارمزد و اسلیپیج (برای مدل‌سازی واقعی‌تر PnL در PaperTrader) ----
     EXCHANGE_TAKER_FEE_PCT = float(os.getenv("EXCHANGE_TAKER_FEE_PCT", 0.0))
@@ -1133,64 +1133,59 @@ class SignalEngine:
 
     def _score_buy(self, latest, prev, p) -> float:
         score = 0.0
-        # روند EMA (پایه)
+        # روند EMA (پایه) - دیگر کامل رد نمی‌کند
         if latest['ema_fast'] > latest['ema_slow']:
             score += 2.0
         else:
-            return 0.0
+            score += 0.4  # حتی بدون EMA صعودی کمی امتیاز بده
 
-        # RSI: کراس یا ناحیه سالم + مومنتوم رو به بالا
+        # RSI
         rsi_cross = latest['rsi'] > p["rsi_buy_min"] and prev['rsi'] <= p["rsi_buy_min"]
         rsi_zone = (p["rsi_buy_max_range_start"] <= latest['rsi'] <= p["rsi_buy_max_range_end"]
                     and latest['rsi'] > prev['rsi'])
         if rsi_cross:
-            score += 2.4
+            score += 2.3
         elif rsi_zone:
-            score += 1.7
+            score += 1.6
+        elif 38 <= latest['rsi'] <= 70:
+            score += 0.8
         else:
-            # اجازه بده کمی امتیاز بگیره اگر بقیه قوی باشن (برای بازار رنج)
-            if 40 <= latest['rsi'] <= 68 and latest['rsi'] >= prev['rsi']:
-                score += 0.7
-            else:
-                return 0.0
+            score += 0.2
 
         # MACD histogram
         if not pd.isna(latest.get('macd_hist', float('nan'))):
             if latest['macd_hist'] > 0 and latest['macd_hist'] > prev.get('macd_hist', 0):
-                score += 1.4
+                score += 1.3
             elif latest['macd_hist'] > 0:
-                score += 0.8
+                score += 0.7
             elif latest['macd_hist'] > prev.get('macd_hist', 0):
-                score += 0.5
+                score += 0.4
 
-        # حجم (خیلی منعطف برای بازار رنج)
+        # حجم - خیلی نرم
         vol_ratio = latest['volume'] / latest['vol_sma'] if latest['vol_sma'] else 0
-        if vol_ratio >= p["volume_mult"] * 1.2:
-            score += 1.8
+        if vol_ratio >= p["volume_mult"] * 1.15:
+            score += 1.7
         elif vol_ratio >= p["volume_mult"]:
-            score += 1.2
-        elif vol_ratio >= 0.65:
-            score += 0.7
-        elif vol_ratio >= 0.45:
-            score += 0.35
-        else:
-            return 0.0
-
-        # نزدیکی به حمایت یا EMA (ترجیح پولبک)
-        near_support = latest['support'] > 0 and (latest['close'] - latest['support']) / latest['close'] < 0.022
-        near_ema = abs(latest['close'] - latest['ema_fast']) / latest['close'] < 0.018
-        if near_support or near_ema:
-            score += 1.3
-        elif latest['close'] > latest['ema_fast']:
+            score += 1.1
+        elif vol_ratio >= 0.55:
             score += 0.6
-        else:
-            score -= 0.35
+        elif vol_ratio >= 0.35:
+            score += 0.3
+        # دیگر return 0 نمی‌کند
+
+        # نزدیکی به حمایت یا EMA
+        near_support = latest['support'] > 0 and (latest['close'] - latest['support']) / latest['close'] < 0.025
+        near_ema = abs(latest['close'] - latest['ema_fast']) / latest['close'] < 0.02
+        if near_support or near_ema:
+            score += 1.2
+        elif latest['close'] > latest['ema_fast']:
+            score += 0.5
 
         # جریمه ورود دیرهنگام
-        if latest['rsi'] > 68:
-            score -= 0.8
-        elif latest['rsi'] > 64:
-            score -= 0.35
+        if latest['rsi'] > 70:
+            score -= 0.7
+        elif latest['rsi'] > 65:
+            score -= 0.3
 
         return score
 
@@ -1243,27 +1238,24 @@ class SignalEngine:
         mtf_ok = self.analysis.is_mtf_aligned(df_1h, "BUY")
 
         if defensive_mode:
-            # حالت تدافعی: هنوز نسبتاً سخت
-            if trend_4h == "BULLISH" and structure == "BULLISH" and mtf_ok:
-                buy_score = self._score_buy(latest, prev, p)
-            elif trend_4h == "BULLISH" and mtf_ok:
-                buy_score = self._score_buy(latest, prev, p) * 0.85
+            if trend_4h == "BULLISH" and mtf_ok:
+                buy_score = self._score_buy(latest, prev, p) * (1.0 if structure == "BULLISH" else 0.85)
             elif trend_4h == "NEUTRAL" and structure == "BULLISH" and mtf_ok:
-                buy_score = self._score_buy(latest, prev, p) * 0.70
+                buy_score = self._score_buy(latest, prev, p) * 0.75
             else:
-                buy_score = 0.0
+                buy_score = self._score_buy(latest, prev, p) * 0.55
         else:
-            # حالت عادی: باز برای بازار رنج/چندجهته
+            # خیلی باز برای شکستن سکوت
             if trend_4h == "BULLISH" and structure == "BULLISH":
                 buy_score = self._score_buy(latest, prev, p)
             elif trend_4h == "BULLISH":
-                buy_score = self._score_buy(latest, prev, p) * 0.92
+                buy_score = self._score_buy(latest, prev, p) * 0.93
             elif trend_4h == "NEUTRAL" and structure == "BULLISH":
-                buy_score = self._score_buy(latest, prev, p) * (0.90 if mtf_ok else 0.80)
+                buy_score = self._score_buy(latest, prev, p) * 0.90
             elif trend_4h == "NEUTRAL":
-                buy_score = self._score_buy(latest, prev, p) * (0.78 if mtf_ok else 0.65)
+                buy_score = self._score_buy(latest, prev, p) * 0.80
             else:
-                buy_score = 0.0
+                buy_score = self._score_buy(latest, prev, p) * 0.60
 
         if buy_score <= 0:
             return None, {}
