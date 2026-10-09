@@ -96,7 +96,7 @@ class Config:
     TREND_TIMEFRAME = "4h"
     CHECK_INTERVAL = 300
 
-    MIN_SIGNAL_SCORE = 7.2
+    MIN_SIGNAL_SCORE = 6.9
     ATR_PERCENTILE_MAX = 98.5
 
     VIRTUAL_CAPITAL_USDT = float(os.getenv("VIRTUAL_CAPITAL_USDT", 10000))
@@ -104,7 +104,7 @@ class Config:
     MAX_CONCURRENT_TRADES = int(os.getenv("MAX_CONCURRENT_TRADES", 4))
     MAX_TRADES_PER_GROUP = int(os.getenv("MAX_TRADES_PER_GROUP", 2))
 
-    MIN_JUDGE_CONFIDENCE = int(os.getenv("MIN_JUDGE_CONFIDENCE", 55))
+    MIN_JUDGE_CONFIDENCE = int(os.getenv("MIN_JUDGE_CONFIDENCE", 52))
 
     # ---- کارمزد و اسلیپیج (برای مدل‌سازی واقعی‌تر PnL در PaperTrader) ----
     EXCHANGE_TAKER_FEE_PCT = float(os.getenv("EXCHANGE_TAKER_FEE_PCT", 0.0))
@@ -1163,35 +1163,34 @@ class SignalEngine:
             elif latest['macd_hist'] > prev.get('macd_hist', 0):
                 score += 0.5
 
-        # حجم (خیلی منعطف‌تر برای شرایط فعلی بازار)
+        # حجم (خیلی منعطف برای بازار رنج)
         vol_ratio = latest['volume'] / latest['vol_sma'] if latest['vol_sma'] else 0
         if vol_ratio >= p["volume_mult"] * 1.2:
-            score += 1.9
+            score += 1.8
         elif vol_ratio >= p["volume_mult"]:
-            score += 1.3
-        elif vol_ratio >= 0.75:
+            score += 1.2
+        elif vol_ratio >= 0.65:
             score += 0.7
-        elif vol_ratio >= 0.55:
+        elif vol_ratio >= 0.45:
             score += 0.35
         else:
             return 0.0
 
-        # نزدیکی به حمایت یا EMA (ترجیح پولبک، اما کامل رد نمی‌کند)
-        near_support = latest['support'] > 0 and (latest['close'] - latest['support']) / latest['close'] < 0.02
-        near_ema = abs(latest['close'] - latest['ema_fast']) / latest['close'] < 0.015
+        # نزدیکی به حمایت یا EMA (ترجیح پولبک)
+        near_support = latest['support'] > 0 and (latest['close'] - latest['support']) / latest['close'] < 0.022
+        near_ema = abs(latest['close'] - latest['ema_fast']) / latest['close'] < 0.018
         if near_support or near_ema:
-            score += 1.4
-        elif latest['close'] > latest['ema_fast'] and (latest['close'] - latest['ema_fast']) / latest['close'] < 0.03:
-            score += 0.7
+            score += 1.3
+        elif latest['close'] > latest['ema_fast']:
+            score += 0.6
         else:
-            # جریمه ملایم‌تر برای تعقیب (دیگر کامل نابود نمی‌کند)
-            score -= 0.6
+            score -= 0.35
 
         # جریمه ورود دیرهنگام
-        if latest['rsi'] > 67:
-            score -= 0.9
-        elif latest['rsi'] > 63:
-            score -= 0.4
+        if latest['rsi'] > 68:
+            score -= 0.8
+        elif latest['rsi'] > 64:
+            score -= 0.35
 
         return score
 
@@ -1244,23 +1243,25 @@ class SignalEngine:
         mtf_ok = self.analysis.is_mtf_aligned(df_1h, "BUY")
 
         if defensive_mode:
-            # حالت تدافعی: فقط ستاپ تمیز
+            # حالت تدافعی: هنوز نسبتاً سخت
             if trend_4h == "BULLISH" and structure == "BULLISH" and mtf_ok:
                 buy_score = self._score_buy(latest, prev, p)
             elif trend_4h == "BULLISH" and mtf_ok:
-                buy_score = self._score_buy(latest, prev, p) * 0.80
+                buy_score = self._score_buy(latest, prev, p) * 0.85
+            elif trend_4h == "NEUTRAL" and structure == "BULLISH" and mtf_ok:
+                buy_score = self._score_buy(latest, prev, p) * 0.70
             else:
                 buy_score = 0.0
         else:
-            # حالت عادی: بازتر برای شرایط نوسانی فعلی
+            # حالت عادی: باز برای بازار رنج/چندجهته
             if trend_4h == "BULLISH" and structure == "BULLISH":
                 buy_score = self._score_buy(latest, prev, p)
             elif trend_4h == "BULLISH":
-                buy_score = self._score_buy(latest, prev, p) * 0.90
+                buy_score = self._score_buy(latest, prev, p) * 0.92
             elif trend_4h == "NEUTRAL" and structure == "BULLISH":
-                buy_score = self._score_buy(latest, prev, p) * (0.88 if mtf_ok else 0.75)
-            elif trend_4h == "NEUTRAL" and mtf_ok:
-                buy_score = self._score_buy(latest, prev, p) * 0.72
+                buy_score = self._score_buy(latest, prev, p) * (0.90 if mtf_ok else 0.80)
+            elif trend_4h == "NEUTRAL":
+                buy_score = self._score_buy(latest, prev, p) * (0.78 if mtf_ok else 0.65)
             else:
                 buy_score = 0.0
 
