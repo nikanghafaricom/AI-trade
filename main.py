@@ -96,15 +96,15 @@ class Config:
     TREND_TIMEFRAME = "4h"
     CHECK_INTERVAL = 300
 
-    MIN_SIGNAL_SCORE = 6.5
-    ATR_PERCENTILE_MAX = 99.0
+    MIN_SIGNAL_SCORE = 7.1
+    ATR_PERCENTILE_MAX = 97
 
     VIRTUAL_CAPITAL_USDT = float(os.getenv("VIRTUAL_CAPITAL_USDT", 10000))
     RISK_PER_TRADE_PCT = float(os.getenv("RISK_PER_TRADE_PCT", 1.5))
-    MAX_CONCURRENT_TRADES = int(os.getenv("MAX_CONCURRENT_TRADES", 4))
+    MAX_CONCURRENT_TRADES = int(os.getenv("MAX_CONCURRENT_TRADES", 3))
     MAX_TRADES_PER_GROUP = int(os.getenv("MAX_TRADES_PER_GROUP", 2))
 
-    MIN_JUDGE_CONFIDENCE = int(os.getenv("MIN_JUDGE_CONFIDENCE", 50))
+    MIN_JUDGE_CONFIDENCE = int(os.getenv("MIN_JUDGE_CONFIDENCE", 56))
 
     # ---- کارمزد و اسلیپیج (برای مدل‌سازی واقعی‌تر PnL در PaperTrader) ----
     EXCHANGE_TAKER_FEE_PCT = float(os.getenv("EXCHANGE_TAKER_FEE_PCT", 0.0))
@@ -562,22 +562,22 @@ class AIParameterOptimizer:
         self._connection_alert_sent = False
 
         default_params = {
-            "rsi_buy_min": 40,
-            "rsi_buy_max_range_start": 46,
-            "rsi_buy_max_range_end": 64,
+            "rsi_buy_min": 42,
+            "rsi_buy_max_range_start": 48,
+            "rsi_buy_max_range_end": 62,
             "rsi_sell_max": 58,
             "rsi_sell_min_range_start": 35,
             "rsi_sell_min_range_end": 52,
-            "volume_mult": 0.95,
-            "atr_min_filter": 0.0014,
-            "cooldown_minutes": 85,
-            "sl_atr_mult": 1.85,
-            "tp1_mult": 1.8,
-            "tp2_mult": 2.6,
-            "tp3_mult": 4.2,
-            "trailing_mult": 1.3,
-            "stress_pctl_threshold": 87,
-            "stress_size_mult": 0.6
+            "volume_mult": 1.05,
+            "atr_min_filter": 0.0015,
+            "cooldown_minutes": 100,
+            "sl_atr_mult": 1.9,
+            "tp1_mult": 1.9,
+            "tp2_mult": 2.8,
+            "tp3_mult": 4.5,
+            "trailing_mult": 1.4,
+            "stress_pctl_threshold": 88,
+            "stress_size_mult": 0.55
         }
 
         SYMBOL_PARAM_OVERRIDES = {
@@ -952,16 +952,18 @@ Respond ONLY with valid JSON, no markdown, no extra text, exactly this shape:
             return {"approve": False, "confidence": 0,
                     "reason": "سهمیه‌ی رایگان Groq تموم شده - طبق تنظیم، سیگنال رد شد (تایید AI الزامیه)"}
 
-        prompt = f"""You are a veteran crypto trader focused on CONSISTENT net profitability. Crypto is volatile — even in "bad" or ranging markets there are upward swings that can be captured for small clean profits.
+        prompt = f"""You are an elite crypto trader focused on HIGH-QUALITY setups only. Your reputation depends on avoiding bad trades.
 
-You review candidates that already passed quantitative filters. Your goal:
-- In strong trends: take good setups for larger moves
-- In mixed/ranging markets: still approve clean small-edge setups that can deliver a few tenths to ~1% net, as long as risk is controlled
-- Overall target: high consistency (aim for equity that compounds positively most days)
+STRICT RULES — reject immediately if any of these are true:
+- 4h trend is BEARISH or clearly against the trade
+- Structure is weak / conflicting with higher timeframe
+- Volume is mediocre or declining
+- Price is extended far from support/EMA (chasing)
+- Symbol has recent consecutive losses
+- Setup looks like chop or low-probability noise
+- BTC is strongly against the direction
 
-Skip only when risk of immediate stop-out or messy chop is clearly high (very weak volume, heavy conflicting signals, symbol on a losing streak + poor structure, extreme extension).
-
-Do NOT require perfection. Prefer approving reasonable edges over staying completely silent.
+Only approve when confluence is genuinely strong and the probability of a clean move favors the trade. Prefer fewer high-quality signals over many mediocre ones. Consistency and capital protection come first.
 
 Trade candidate:
 Symbol: {symbol}
@@ -1132,62 +1134,67 @@ class SignalEngine:
         self.analysis = analysis
 
     def _score_buy(self, latest, prev, p) -> float:
+        """امتیازدهی متعادل — کیفیت خوب + اجازه فعالیت"""
         score = 0.0
-        # روند EMA (پایه) - دیگر کامل رد نمی‌کند
+
+        # ۱. روند EMA
         if latest['ema_fast'] > latest['ema_slow']:
             score += 2.0
         else:
-            score += 0.4  # حتی بدون EMA صعودی کمی امتیاز بده
+            return 0.0
 
-        # RSI
+        # ۲. RSI
         rsi_cross = latest['rsi'] > p["rsi_buy_min"] and prev['rsi'] <= p["rsi_buy_min"]
         rsi_zone = (p["rsi_buy_max_range_start"] <= latest['rsi'] <= p["rsi_buy_max_range_end"]
                     and latest['rsi'] > prev['rsi'])
         if rsi_cross:
-            score += 2.3
+            score += 2.4
         elif rsi_zone:
-            score += 1.6
-        elif 38 <= latest['rsi'] <= 70:
-            score += 0.8
+            score += 1.7
+        elif 42 <= latest['rsi'] <= 65 and latest['rsi'] >= prev['rsi']:
+            score += 0.9
         else:
-            score += 0.2
+            return 0.0
 
-        # MACD histogram
+        # ۳. MACD
         if not pd.isna(latest.get('macd_hist', float('nan'))):
             if latest['macd_hist'] > 0 and latest['macd_hist'] > prev.get('macd_hist', 0):
-                score += 1.3
+                score += 1.4
             elif latest['macd_hist'] > 0:
-                score += 0.7
+                score += 0.8
             elif latest['macd_hist'] > prev.get('macd_hist', 0):
                 score += 0.4
 
-        # حجم - خیلی نرم
+        # ۴. حجم
         vol_ratio = latest['volume'] / latest['vol_sma'] if latest['vol_sma'] else 0
-        if vol_ratio >= p["volume_mult"] * 1.15:
-            score += 1.7
+        if vol_ratio >= p["volume_mult"] * 1.2:
+            score += 1.8
         elif vol_ratio >= p["volume_mult"]:
-            score += 1.1
-        elif vol_ratio >= 0.55:
-            score += 0.6
-        elif vol_ratio >= 0.35:
-            score += 0.3
-        # دیگر return 0 نمی‌کند
-
-        # نزدیکی به حمایت یا EMA
-        near_support = latest['support'] > 0 and (latest['close'] - latest['support']) / latest['close'] < 0.025
-        near_ema = abs(latest['close'] - latest['ema_fast']) / latest['close'] < 0.02
-        if near_support or near_ema:
             score += 1.2
+        elif vol_ratio >= 0.70:
+            score += 0.6
+        elif vol_ratio >= 0.55:
+            score += 0.3
+        else:
+            return 0.0
+
+        # ۵. نزدیکی به حمایت / EMA
+        near_support = latest['support'] > 0 and (latest['close'] - latest['support']) / latest['close'] < 0.018
+        near_ema = abs(latest['close'] - latest['ema_fast']) / latest['close'] < 0.014
+        if near_support or near_ema:
+            score += 1.4
         elif latest['close'] > latest['ema_fast']:
             score += 0.5
+        else:
+            score -= 0.6
 
-        # جریمه ورود دیرهنگام
-        if latest['rsi'] > 70:
-            score -= 0.7
-        elif latest['rsi'] > 65:
-            score -= 0.3
+        # ۶. جریمه overbought
+        if latest['rsi'] > 67:
+            score -= 0.9
+        elif latest['rsi'] > 63:
+            score -= 0.4
 
-        return score
+        return max(0.0, score)
 
     def get_rule_signal(self, symbol: str, df_15m: pd.DataFrame, df_1h: pd.DataFrame, trend_4h: str,
                          macro_context: Optional[dict] = None, portfolio_adjustments: Optional[dict] = None) -> Tuple[Optional[str], dict]:
@@ -1237,52 +1244,55 @@ class SignalEngine:
         # ---- فقط پوزیشن Long/BUY (اسپات) - نسخه متعادل: فعال در بازار بد + قوی در بازار خوب ----
         mtf_ok = self.analysis.is_mtf_aligned(df_1h, "BUY")
 
+        # ---- فیلتر روند: خرید در روند نزولی ۴ ساعته ممنوع ----
+        if trend_4h == "BEARISH":
+            return None, {}
+
         if defensive_mode:
-            if trend_4h == "BULLISH" and mtf_ok:
-                buy_score = self._score_buy(latest, prev, p) * (1.0 if structure == "BULLISH" else 0.85)
-            elif trend_4h == "NEUTRAL" and structure == "BULLISH" and mtf_ok:
-                buy_score = self._score_buy(latest, prev, p) * 0.75
-            else:
-                buy_score = self._score_buy(latest, prev, p) * 0.55
-        else:
-            # خیلی باز برای شکستن سکوت
-            if trend_4h == "BULLISH" and structure == "BULLISH":
+            if trend_4h == "BULLISH" and structure == "BULLISH" and mtf_ok:
                 buy_score = self._score_buy(latest, prev, p)
-            elif trend_4h == "BULLISH":
-                buy_score = self._score_buy(latest, prev, p) * 0.93
-            elif trend_4h == "NEUTRAL" and structure == "BULLISH":
-                buy_score = self._score_buy(latest, prev, p) * 0.90
-            elif trend_4h == "NEUTRAL":
+            elif trend_4h == "BULLISH" and mtf_ok:
                 buy_score = self._score_buy(latest, prev, p) * 0.80
             else:
-                buy_score = self._score_buy(latest, prev, p) * 0.60
+                return None, {}
+        else:
+            if trend_4h == "BULLISH" and structure == "BULLISH":
+                buy_score = self._score_buy(latest, prev, p)
+            elif trend_4h == "BULLISH" and mtf_ok:
+                buy_score = self._score_buy(latest, prev, p) * 0.88
+            elif trend_4h == "NEUTRAL" and structure == "BULLISH" and mtf_ok:
+                buy_score = self._score_buy(latest, prev, p) * 0.82
+            elif trend_4h == "NEUTRAL" and structure == "BULLISH":
+                buy_score = self._score_buy(latest, prev, p) * 0.72
+            else:
+                return None, {}
 
         if buy_score <= 0:
             return None, {}
 
         # امتیازهای confluence
         if trend_4h == "BULLISH":
-            buy_score += 1.1
+            buy_score += 1.2
         if structure == "BULLISH":
-            buy_score += 1.6
-        if mtf_ok:
             buy_score += 1.5
+        if mtf_ok:
+            buy_score += 1.4
         else:
             buy_score *= 0.75
 
         # هم‌راستایی BTC
-        if symbol != "BTC/USDT" and btc_trend_4h and btc_structure:
-            if btc_trend_4h == "BEARISH" and btc_structure == "BEARISH":
-                buy_score -= 1.3
+        if symbol != "BTC/USDT" and btc_trend_4h:
+            if btc_trend_4h == "BEARISH":
+                buy_score -= 1.5
             elif btc_trend_4h == "BULLISH" and btc_structure == "BULLISH":
                 buy_score += 1.1
             elif btc_trend_4h == "BULLISH":
-                buy_score += 0.5
-            elif btc_trend_4h == "NEUTRAL":
+                buy_score += 0.4
+            else:
                 buy_score -= 0.2
 
         if fng is not None:
-            if fng <= 28:
+            if fng <= 25:
                 buy_score += 0.5
             elif fng >= 80:
                 buy_score -= 0.7
@@ -1314,14 +1324,12 @@ class SignalEngine:
                 elif ref_health < -0.35:
                     buy_score -= 0.6
 
-        # جریمه ضررهای متوالی همان نماد (جلوگیری از ورودهای ضعیف پشت‌سرهم)
+        # جریمه ضررهای متوالی همان نماد
         consec = self.ai_optimizer.symbol_states.get(symbol, {}).get("consecutive_losses", 0)
-        if consec >= 3:
-            buy_score -= 1.4
-        elif consec >= 2:
-            buy_score -= 0.9
+        if consec >= 2:
+            buy_score -= 1.3
         elif consec >= 1:
-            buy_score -= 0.4
+            buy_score -= 0.6
 
         # آستانه‌ی پویا: در حالت CAUTION/DEFENSIVE سخت‌گیرتر می‌شه
         threshold = self.config.MIN_SIGNAL_SCORE + score_adjustment
