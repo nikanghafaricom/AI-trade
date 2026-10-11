@@ -14,6 +14,15 @@
 # • حداقل اطمینان AI: 60 (قبلاً 55)
 # • آستانه ورود به DEFENSIVE/CAUTION کمی حساس‌تر شد (۳ ضرر متوالی)
 # • پرامپت Judge محتاط‌تر نسبت به حجم ضعیف و ضعف BTC
+#
+# بهبودهای نسخه ضد قطع‌سیگنال (Oct 2026):
+# • رفع باگ اصلی: بعد از ۱ ضرر، Judge به‌خاطر consecutive_losses>0 تقریباً همه‌ی سیگنال‌های
+#   بعدی همان نماد را رد می‌کرد → اکنون فقط >=3 ضرر متوالی hard-reject است و ۱–۲ ضرر soft factor
+# • زوال زمانی consecutive_losses (هر ۴ ساعت بدون ضرر جدید یک پله کم می‌شود) تا ربات بعد از
+#   چند ساعت دوباره بتواند سیگنال باکیفیت بدهد
+# • ATR_PERCENTILE_MAX از ۹۷ به ۹۹ (فیلتر نوسان فقط spikeهای افراطی را رد می‌کند)
+# • MIN_SIGNAL_SCORE از ۷.۵ به ۷.۰ + کول‌داون پیش‌فرض ۹۰→۶۰ دقیقه (فرکانس بالاتر بدون افت کیفیت)
+# • بلک‌لیست بعد از ضرر اول کوتاه‌تر (۴۵ دقیقه به‌جای ۱.۵ ساعت)
 # ==============================================
 import os
 import time
@@ -105,8 +114,8 @@ class Config:
     TREND_TIMEFRAME = "4h"
     CHECK_INTERVAL = 300
 
-    MIN_SIGNAL_SCORE = 7.5
-    ATR_PERCENTILE_MAX = 97
+    MIN_SIGNAL_SCORE = 7.0
+    ATR_PERCENTILE_MAX = 99
 
     VIRTUAL_CAPITAL_USDT = float(os.getenv("VIRTUAL_CAPITAL_USDT", 10000))
     RISK_PER_TRADE_PCT = float(os.getenv("RISK_PER_TRADE_PCT", 1.5))
@@ -551,8 +560,10 @@ class AIParameterOptimizer:
         self.groq_endpoint = "https://api.groq.com/openai/"
 
         self.blacklist: Dict[str, dict] = {}
-        self.BLACKLIST_MIN_COOLDOWN_MINUTES = 20
-        self.BLACKLIST_EARLY_RELEASE_PCTL = 70
+        self.BLACKLIST_MIN_COOLDOWN_MINUTES = 15
+        self.BLACKLIST_EARLY_RELEASE_PCTL = 75
+        # زوال زمانی consecutive_losses: بعد از این مدت بدون ضرر جدید، شمارنده یک پله کم می‌شود
+        self.CONSECUTIVE_LOSS_DECAY_HOURS = 4
 
         self.MAX_RETRIES_429 = 2
         self.MAX_BACKOFF_SECONDS = 8
@@ -579,7 +590,7 @@ class AIParameterOptimizer:
             "rsi_sell_min_range_end": 52,
             "volume_mult": 1.0,
             "atr_min_filter": 0.0015,
-            "cooldown_minutes": 90,
+            "cooldown_minutes": 60,
             "sl_atr_mult": 1.5,
             "tp1_mult": 1.5,
             "tp2_mult": 2.5,
@@ -598,8 +609,8 @@ class AIParameterOptimizer:
             "AVAX/USDT": {"atr_min_filter": 0.0018, "sl_atr_mult": 1.7},
             "NEAR/USDT": {"atr_min_filter": 0.0018, "sl_atr_mult": 1.7},
             "ADA/USDT":  {"atr_min_filter": 0.0015},
-            "XRP/USDT":  {"atr_min_filter": 0.0020, "cooldown_minutes": 110},
-            "DOGE/USDT": {"atr_min_filter": 0.0025, "sl_atr_mult": 1.9, "cooldown_minutes": 120},
+            "XRP/USDT":  {"atr_min_filter": 0.0020, "cooldown_minutes": 75},
+            "DOGE/USDT": {"atr_min_filter": 0.0025, "sl_atr_mult": 1.9, "cooldown_minutes": 80},
             "LINK/USDT": {"atr_min_filter": 0.0016, "sl_atr_mult": 1.6},
             "PAXG/USDT": {"atr_min_filter": 0.0008, "sl_atr_mult": 1.2, "tp1_mult": 1.3, "rsi_buy_max_range_end": 62},
         }
@@ -610,6 +621,7 @@ class AIParameterOptimizer:
             self.symbol_states[sym] = {
                 "last_optimized_time": None,
                 "consecutive_losses": 0,
+                "last_loss_time": None,
                 "params": self.validate_and_clamp_params(merged_params)
             }
         self.optimization_interval = timedelta(hours=2)
@@ -638,8 +650,10 @@ class AIParameterOptimizer:
     def register_loss(self, symbol: str):
         state = self.symbol_states[symbol]
         state["consecutive_losses"] += 1
-        penalty_hours = min(1.5 * state["consecutive_losses"], 6)
         now = datetime.now()
+        state["last_loss_time"] = now
+        # بلک‌لیست کوتاه‌تر: ضرر اول ۴۵ دقیقه، بعد از آن تا حداکثر ۴ ساعت
+        penalty_hours = min(0.75 * state["consecutive_losses"], 4.0)
         self.blacklist[symbol] = {
             "blocked_at": now,
             "hard_release_at": now + timedelta(hours=penalty_hours)
@@ -649,8 +663,37 @@ class AIParameterOptimizer:
     def register_win(self, symbol: str):
         state = self.symbol_states[symbol]
         state["consecutive_losses"] = 0
+        state["last_loss_time"] = None
         if symbol in self.blacklist:
             del self.blacklist[symbol]
+
+    def decay_consecutive_losses(self, symbol: str) -> int:
+        """زوال زمانی: هر CONSECUTIVE_LOSS_DECAY_HOURS بدون ضرر جدید، یک پله از شمارنده کم می‌شود.
+        این جلوی قفل شدن دائمی سیگنال یک نماد بعد از یک ضرر را می‌گیرد."""
+        state = self.symbol_states.get(symbol)
+        if not state:
+            return 0
+        losses = state.get("consecutive_losses", 0)
+        if losses <= 0:
+            return 0
+        last_loss = state.get("last_loss_time")
+        if last_loss is None:
+            state["consecutive_losses"] = 0
+            return 0
+        hours_since = (datetime.now() - last_loss).total_seconds() / 3600.0
+        steps = int(hours_since // self.CONSECUTIVE_LOSS_DECAY_HOURS)
+        if steps > 0:
+            new_val = max(0, losses - steps)
+            if new_val != losses:
+                logger.info(f"{symbol}: زوال زمانی consecutive_losses: {losses} → {new_val} "
+                            f"(پس از {hours_since:.1f} ساعت بدون ضرر جدید)")
+                state["consecutive_losses"] = new_val
+                if new_val == 0:
+                    state["last_loss_time"] = None
+                    if symbol in self.blacklist:
+                        del self.blacklist[symbol]
+            return new_val
+        return losses
 
     def validate_and_clamp_params(self, new_params: dict) -> dict:
         clamped = {}
@@ -664,7 +707,7 @@ class AIParameterOptimizer:
 
         clamped["volume_mult"] = max(0.7, min(float(new_params.get("volume_mult", 1.0)), 1.6))
         clamped["atr_min_filter"] = max(0.0008, min(float(new_params.get("atr_min_filter", 0.0015)), 0.004))
-        clamped["cooldown_minutes"] = max(45, min(int(new_params.get("cooldown_minutes", 90)), 240))
+        clamped["cooldown_minutes"] = max(40, min(int(new_params.get("cooldown_minutes", 60)), 180))
 
         clamped["sl_atr_mult"] = max(1.2, min(float(new_params.get("sl_atr_mult", 1.5)), 2.5))
         clamped["tp1_mult"] = max(1.2, min(float(new_params.get("tp1_mult", 1.5)), 3.0))
@@ -965,14 +1008,19 @@ Respond ONLY with valid JSON, no markdown, no extra text, exactly this shape:
 
 Your only job now is the kind of contextual judgment an elite human trader adds on top of a systematic setup: given everything below, does the broader picture actually support taking this trade right now, or is there something about the current context that says skip it even though the numbers look fine?
 
-CRITICAL rejection reasons (prefer REJECT with confidence 55-75 if any of these are true):
-- volume_vs_avg_ratio is below ~0.9 (thin or weak volume)
+HARD rejection reasons (prefer REJECT with confidence 55-75 if ANY of these are true):
+- volume_vs_avg_ratio is below ~0.85 (thin or weak volume)
 - BTC shows clear weakness (btc_rsi < 35 or deeply negative btc_macd_hist) while this is an altcoin BUY
-- portfolio_state is CAUTION or DEFENSIVE and recent rolling stats are weak
-- structure is NEUTRAL or conflicting with the higher-timeframe trend
-- the symbol already has consecutive_losses_this_symbol > 0
+- portfolio_state is DEFENSIVE and recent rolling stats are weak
+- structure is BEARISH while side is BUY (or conflicting hard with the higher-timeframe trend)
+- the symbol already has consecutive_losses_this_symbol >= 3 (repeated failures on this symbol)
 
-Only APPROVE when the overall picture is clean: solid volume, BTC not in clear weakness, structure supportive, and no recent portfolio stress.
+SOFT factors (may lower confidence by 5-15 points, but do NOT alone force REJECT if quant score is strong and other factors are clean):
+- consecutive_losses_this_symbol is 1 or 2 (one or two recent losses is normal; the quant system already filtered quality)
+- structure is NEUTRAL but trend_4h is BULLISH and volume is healthy
+- portfolio_state is CAUTION (be a bit more selective, not fully closed)
+
+Bias toward APPROVE when: quant score is solid, volume is healthy (>=0.9), BTC is not in clear weakness, structure is BULLISH or supportive, and consecutive_losses_this_symbol < 3. Do not reject solely because the symbol had one recent loss.
 
 Trade candidate:
 Symbol: {symbol}
@@ -1175,6 +1223,9 @@ class SignalEngine:
 
         pctl = self.analysis.atr_percentile(df_15m)
 
+        # زوال زمانی consecutive_losses قبل از هر تصمیم (جلوگیری از قفل دائمی بعد از یک ضرر)
+        self.ai_optimizer.decay_consecutive_losses(symbol)
+
         if self.ai_optimizer.is_blacklisted(symbol, current_pctl=pctl):
             return None, {}
         if not self.analysis.is_market_tradable(df_15m):
@@ -1297,7 +1348,7 @@ class SignalEngine:
             "volume_vs_avg_ratio": round(float(vol_ratio), 2),
             "atr_percentile_100candles": round(pctl, 1),
             "mtf_1h_aligned": self.analysis.is_mtf_aligned(df_1h, "BUY"),
-            "consecutive_losses_this_symbol": self.ai_optimizer.symbol_states[symbol]["consecutive_losses"],
+            "consecutive_losses_this_symbol": self.ai_optimizer.decay_consecutive_losses(symbol),
             "fear_greed_index": fng,
             "btc_macro_trend_4h": btc_trend_4h,
             "btc_macro_structure": btc_structure,
@@ -1983,7 +2034,7 @@ class HybridTradingSystem:
 
             now = datetime.now()
             p = self.ai_optimizer.get_params(symbol)
-            cooldown = p.get("cooldown_minutes", 90) * portfolio_adjustments.get("cooldown_mult", 1.0)
+            cooldown = p.get("cooldown_minutes", 60) * portfolio_adjustments.get("cooldown_mult", 1.0)
             if symbol in self.last_signal_time:
                 if now - self.last_signal_time[symbol] < timedelta(minutes=cooldown):
                     return True
