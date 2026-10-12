@@ -15,14 +15,14 @@
 # • آستانه ورود به DEFENSIVE/CAUTION کمی حساس‌تر شد (۳ ضرر متوالی)
 # • پرامپت Judge محتاط‌تر نسبت به حجم ضعیف و ضعف BTC
 #
-# بهبودهای نسخه ضد قطع‌سیگنال (Oct 2026):
-# • رفع باگ اصلی: بعد از ۱ ضرر، Judge به‌خاطر consecutive_losses>0 تقریباً همه‌ی سیگنال‌های
-#   بعدی همان نماد را رد می‌کرد → اکنون فقط >=3 ضرر متوالی hard-reject است و ۱–۲ ضرر soft factor
-# • زوال زمانی consecutive_losses (هر ۴ ساعت بدون ضرر جدید یک پله کم می‌شود) تا ربات بعد از
-#   چند ساعت دوباره بتواند سیگنال باکیفیت بدهد
-# • ATR_PERCENTILE_MAX از ۹۷ به ۹۹ (فیلتر نوسان فقط spikeهای افراطی را رد می‌کند)
-# • MIN_SIGNAL_SCORE از ۷.۵ به ۷.۰ + کول‌داون پیش‌فرض ۹۰→۶۰ دقیقه (فرکانس بالاتر بدون افت کیفیت)
-# • بلک‌لیست بعد از ضرر اول کوتاه‌تر (۴۵ دقیقه به‌جای ۱.۵ ساعت)
+# بهبودهای نسخه کیفیت‌محور (Oct 2026 - ضد ضرر):
+# • رفع باگ چند پوزیشن همزمان روی یک نماد + اعمال سقف MAX_CONCURRENT_TRADES
+# • گیت سخت: ساختار BEARISH ممنوع | BTC_trend=BEARISH برای آلت ممنوع
+# • گیت سخت: هم‌راستایی 1h الزامی | حجم < 0.90 رد | BTC_RSI>75 رد آلت | ضعف BTC رد آلت
+# • MIN_SIGNAL_SCORE=7.5 | ATR_PERCENTILE_MAX=98 | کول‌داون ۹۰ دقیقه (فرکانس قبلی حفظ شد)
+# • SL کمی گشادتر برای آلت‌ها (کاهش stop-hunt)
+# • زوال زمانی consecutive_losses حفظ شد (قفل دائمی برنمی‌گردد)
+# • Judge: hard-reject با >=2 ضرر متوالی / DEFENSIVE / ساختار ضعیف / BTC ضعیف یا اشباع
 # ==============================================
 import os
 import time
@@ -114,8 +114,8 @@ class Config:
     TREND_TIMEFRAME = "4h"
     CHECK_INTERVAL = 300
 
-    MIN_SIGNAL_SCORE = 7.0
-    ATR_PERCENTILE_MAX = 99
+    MIN_SIGNAL_SCORE = 7.5
+    ATR_PERCENTILE_MAX = 98
 
     VIRTUAL_CAPITAL_USDT = float(os.getenv("VIRTUAL_CAPITAL_USDT", 10000))
     RISK_PER_TRADE_PCT = float(os.getenv("RISK_PER_TRADE_PCT", 1.5))
@@ -590,8 +590,8 @@ class AIParameterOptimizer:
             "rsi_sell_min_range_end": 52,
             "volume_mult": 1.0,
             "atr_min_filter": 0.0015,
-            "cooldown_minutes": 60,
-            "sl_atr_mult": 1.5,
+            "cooldown_minutes": 90,
+            "sl_atr_mult": 1.6,
             "tp1_mult": 1.5,
             "tp2_mult": 2.5,
             "tp3_mult": 4.0,
@@ -605,12 +605,12 @@ class AIParameterOptimizer:
             "ETH/USDT":  {"atr_min_filter": 0.0012, "sl_atr_mult": 1.4},
             "BNB/USDT":  {"atr_min_filter": 0.0012, "sl_atr_mult": 1.4},
             "LTC/USDT":  {"atr_min_filter": 0.0013, "sl_atr_mult": 1.4},
-            "SOL/USDT":  {"atr_min_filter": 0.0018, "sl_atr_mult": 1.7, "rsi_buy_max_range_end": 68},
-            "AVAX/USDT": {"atr_min_filter": 0.0018, "sl_atr_mult": 1.7},
-            "NEAR/USDT": {"atr_min_filter": 0.0018, "sl_atr_mult": 1.7},
+            "SOL/USDT":  {"atr_min_filter": 0.0018, "sl_atr_mult": 1.8, "rsi_buy_max_range_end": 68},
+            "AVAX/USDT": {"atr_min_filter": 0.0018, "sl_atr_mult": 1.8},
+            "NEAR/USDT": {"atr_min_filter": 0.0018, "sl_atr_mult": 1.8},
             "ADA/USDT":  {"atr_min_filter": 0.0015},
-            "XRP/USDT":  {"atr_min_filter": 0.0020, "cooldown_minutes": 75},
-            "DOGE/USDT": {"atr_min_filter": 0.0025, "sl_atr_mult": 1.9, "cooldown_minutes": 80},
+            "XRP/USDT":  {"atr_min_filter": 0.0020, "cooldown_minutes": 110},
+            "DOGE/USDT": {"atr_min_filter": 0.0025, "sl_atr_mult": 2.0, "cooldown_minutes": 120},
             "LINK/USDT": {"atr_min_filter": 0.0016, "sl_atr_mult": 1.6},
             "PAXG/USDT": {"atr_min_filter": 0.0008, "sl_atr_mult": 1.2, "tp1_mult": 1.3, "rsi_buy_max_range_end": 62},
         }
@@ -707,7 +707,7 @@ class AIParameterOptimizer:
 
         clamped["volume_mult"] = max(0.7, min(float(new_params.get("volume_mult", 1.0)), 1.6))
         clamped["atr_min_filter"] = max(0.0008, min(float(new_params.get("atr_min_filter", 0.0015)), 0.004))
-        clamped["cooldown_minutes"] = max(40, min(int(new_params.get("cooldown_minutes", 60)), 180))
+        clamped["cooldown_minutes"] = max(45, min(int(new_params.get("cooldown_minutes", 90)), 180))
 
         clamped["sl_atr_mult"] = max(1.2, min(float(new_params.get("sl_atr_mult", 1.5)), 2.5))
         clamped["tp1_mult"] = max(1.2, min(float(new_params.get("tp1_mult", 1.5)), 3.0))
@@ -1009,18 +1009,19 @@ Respond ONLY with valid JSON, no markdown, no extra text, exactly this shape:
 Your only job now is the kind of contextual judgment an elite human trader adds on top of a systematic setup: given everything below, does the broader picture actually support taking this trade right now, or is there something about the current context that says skip it even though the numbers look fine?
 
 HARD rejection reasons (prefer REJECT with confidence 55-75 if ANY of these are true):
-- volume_vs_avg_ratio is below ~0.85 (thin or weak volume)
-- BTC shows clear weakness (btc_rsi < 35 or deeply negative btc_macd_hist) while this is an altcoin BUY
-- portfolio_state is DEFENSIVE and recent rolling stats are weak
-- structure is BEARISH while side is BUY (or conflicting hard with the higher-timeframe trend)
-- the symbol already has consecutive_losses_this_symbol >= 3 (repeated failures on this symbol)
+- volume_vs_avg_ratio is below ~0.95 (thin or weak volume)
+- BTC shows clear weakness (btc_rsi < 38 or deeply negative btc_macd_hist) while this is an altcoin BUY
+- BTC is overbought (btc_rsi > 75) while this is an altcoin BUY (chasing exhaustion)
+- portfolio_state is DEFENSIVE
+- structure is BEARISH or NEUTRAL while trend_4h is not clearly BULLISH
+- mtf_1h_aligned is false
+- the symbol already has consecutive_losses_this_symbol >= 2
 
-SOFT factors (may lower confidence by 5-15 points, but do NOT alone force REJECT if quant score is strong and other factors are clean):
-- consecutive_losses_this_symbol is 1 or 2 (one or two recent losses is normal; the quant system already filtered quality)
-- structure is NEUTRAL but trend_4h is BULLISH and volume is healthy
-- portfolio_state is CAUTION (be a bit more selective, not fully closed)
+SOFT factors (may lower confidence by 5-10 points, but do NOT alone force REJECT if quant score is strong and other factors are clean):
+- consecutive_losses_this_symbol is exactly 1
+- portfolio_state is CAUTION (be more selective)
 
-Bias toward APPROVE when: quant score is solid, volume is healthy (>=0.9), BTC is not in clear weakness, structure is BULLISH or supportive, and consecutive_losses_this_symbol < 3. Do not reject solely because the symbol had one recent loss.
+Only APPROVE when: quant score is solid, volume healthy (>=0.95), BTC not weak and not overbought, structure BULLISH, mtf aligned, and consecutive_losses_this_symbol < 2.
 
 Trade candidate:
 Symbol: {symbol}
@@ -1263,17 +1264,50 @@ class SignalEngine:
             return None, {}
 
         structure = self.analysis.market_structure(df_15m)
+        mtf_aligned = self.analysis.is_mtf_aligned(df_1h, "BUY")
+        vol_ratio_early = latest['volume'] / latest['vol_sma'] if latest['vol_sma'] else 0
+
+        # ========== گیت‌های سخت کیفیت (جلوگیری از ضررهای سیستماتیک) ==========
+        # 1) ساختار نزولی → هیچ خرید مجاز نیست
+        if structure == "BEARISH":
+            logger.info(f"{symbol}: ساختار BEARISH - خرید رد شد")
+            return None, {}
+
+        # 2) برای آلت‌کوین: اگر BTC در روند 4h نزولی است → خرید ممنوع
+        if symbol not in ("BTC/USDT", "PAXG/USDT") and btc_trend_4h == "BEARISH":
+            logger.info(f"{symbol}: BTC_trend=BEARISH - خرید آلت رد شد")
+            return None, {}
+
+        # 3) تایید چندتایم‌فریمی 1h الزامی (قبلاً فقط امتیاز بود)
+        if not mtf_aligned:
+            logger.info(f"{symbol}: عدم هم‌راستایی 1h - خرید رد شد")
+            return None, {}
+
+        # 4) حجم ضعیف → رد
+        if vol_ratio_early < 0.90:
+            logger.info(f"{symbol}: حجم ضعیف ({vol_ratio_early:.2f}) - رد شد")
+            return None, {}
+
+        # 5) تعقیب اشباع خرید BTC (RSI خیلی بالا) برای آلت ممنوع
+        if symbol not in ("BTC/USDT", "PAXG/USDT") and btc_rsi is not None and btc_rsi > 75:
+            logger.info(f"{symbol}: BTC_RSI اشباع خرید ({btc_rsi:.1f}) - خرید آلت رد شد")
+            return None, {}
+
+        # 6) ضعف واضح BTC (RSI پایین + MACD منفی عمیق) → رد آلت
+        if symbol not in ("BTC/USDT", "PAXG/USDT") and btc_rsi is not None and btc_macd_hist is not None:
+            if btc_rsi < 32 and btc_macd_hist < -20:
+                logger.info(f"{symbol}: ضعف واضح BTC (RSI={btc_rsi:.1f}, MACD={btc_macd_hist:.1f}) - خرید آلت رد شد")
+                return None, {}
 
         # ---- فقط پوزیشن Long/BUY (اسپات) ----
-        # در حالت DEFENSIVE پرتفوی (چند ضرر متوالی/expectancy منفی)، حالت NEUTRAL+ساختار
-        # صعودی دیگه مجاز نیست و فقط روند خالص BULLISH در تایم‌فریم 4h سیگنال می‌ده - این
-        # همون جایی‌یه که سیستم به‌خاطر عملکرد ضعیف اخیر، خودش سخت‌گیرتر شده.
+        # در حالت DEFENSIVE فقط روند خالص BULLISH مجاز است.
+        # در حالت عادی: BULLISH کامل، یا NEUTRAL فقط با ساختار BULLISH (با ضریب کمتر).
         if defensive_mode:
             buy_score = self._score_buy(latest, prev, p) if trend_4h == "BULLISH" else 0.0
         elif trend_4h == "BULLISH":
             buy_score = self._score_buy(latest, prev, p)
         elif trend_4h == "NEUTRAL" and structure == "BULLISH":
-            buy_score = self._score_buy(latest, prev, p) * 0.72
+            buy_score = self._score_buy(latest, prev, p) * 0.65
         else:
             buy_score = 0.0
 
@@ -1282,19 +1316,16 @@ class SignalEngine:
 
         if structure == "BULLISH":
             buy_score += 1.5
-        elif structure == "BEARISH":
-            buy_score -= 1.0
 
-        if buy_score > 0 and self.analysis.is_mtf_aligned(df_1h, "BUY"):
+        # MTF دیگر الزامی است؛ امتیاز پاداش هم حفظ می‌شود
+        if mtf_aligned:
             buy_score += 1.5
 
         if symbol != "BTC/USDT" and btc_trend_4h and btc_structure:
-            if btc_trend_4h == "BEARISH" and btc_structure == "BEARISH":
-                buy_score -= 1.5
-            elif btc_trend_4h == "BEARISH":
-                buy_score -= 0.8
-            elif btc_trend_4h == "BULLISH" and btc_structure == "BULLISH":
+            if btc_trend_4h == "BULLISH" and btc_structure == "BULLISH":
                 buy_score += 1.0
+            elif btc_structure == "BEARISH":
+                buy_score -= 1.0
 
         if fng is not None:
             if fng <= 20:
@@ -1308,21 +1339,16 @@ class SignalEngine:
             elif funding_rate < -0.0005:
                 buy_score += 0.5
 
-        # جریمه قوی‌تر وقتی بیت‌کوین در ضعف واضح است (جلوگیری از ورودهای ضعیف بدون کاهش زیاد سیگنال)
         if symbol != "BTC/USDT" and btc_rsi is not None:
-            if btc_rsi < 28:
-                buy_score -= 1.2
-            elif btc_rsi < 35:
-                buy_score -= 0.6
+            if btc_rsi < 35:
+                buy_score -= 0.8
             elif btc_aligned_now and btc_trend_4h == "BULLISH":
                 if 50 <= btc_rsi <= 68:
                     buy_score += 0.3
-                elif btc_rsi > 75:
-                    buy_score -= 0.3
 
         if symbol != "BTC/USDT" and btc_macd_hist is not None:
-            if btc_macd_hist < -50:
-                buy_score -= 0.8
+            if btc_macd_hist < -30:
+                buy_score -= 0.6
             elif btc_aligned_now and btc_trend_4h == "BULLISH" and btc_macd_hist > 0:
                 buy_score += 0.2
 
@@ -1347,7 +1373,7 @@ class SignalEngine:
             "macd_hist": round(float(latest['macd_hist']), 6) if not pd.isna(latest.get('macd_hist', float('nan'))) else None,
             "volume_vs_avg_ratio": round(float(vol_ratio), 2),
             "atr_percentile_100candles": round(pctl, 1),
-            "mtf_1h_aligned": self.analysis.is_mtf_aligned(df_1h, "BUY"),
+            "mtf_1h_aligned": mtf_aligned,
             "consecutive_losses_this_symbol": self.ai_optimizer.decay_consecutive_losses(symbol),
             "fear_greed_index": fng,
             "btc_macro_trend_4h": btc_trend_4h,
@@ -1443,6 +1469,15 @@ class RiskManager:
 
     def can_open_trade(self, symbol: str, active_trades: Dict, correlation_manager: Optional["CorrelationManager"] = None,
                         btc_volatility_pctl: Optional[float] = None) -> Tuple[bool, str]:
+        # سقف کل معاملات همزمان
+        if len(active_trades) >= self.config.MAX_CONCURRENT_TRADES:
+            return False, f"به سقف {self.config.MAX_CONCURRENT_TRADES} معامله‌ی همزمان رسیدیم"
+
+        # جلوگیری از چند پوزیشن همزمان روی همان نماد (باگ قبلی که ریسک را دو برابر می‌کرد)
+        same_symbol = sum(1 for t in active_trades.values() if t.get("symbol") == symbol)
+        if same_symbol >= 1:
+            return False, f"قبلاً یک پوزیشن باز روی {symbol} وجود دارد"
+
         if correlation_manager is not None:
             threshold = correlation_manager.get_dynamic_threshold(btc_volatility_pctl)
             corr_count = correlation_manager.correlated_count(symbol, active_trades, threshold)
@@ -2034,7 +2069,7 @@ class HybridTradingSystem:
 
             now = datetime.now()
             p = self.ai_optimizer.get_params(symbol)
-            cooldown = p.get("cooldown_minutes", 60) * portfolio_adjustments.get("cooldown_mult", 1.0)
+            cooldown = p.get("cooldown_minutes", 90) * portfolio_adjustments.get("cooldown_mult", 1.0)
             if symbol in self.last_signal_time:
                 if now - self.last_signal_time[symbol] < timedelta(minutes=cooldown):
                     return True
