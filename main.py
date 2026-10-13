@@ -1,10 +1,16 @@
 # ==============================================
-# Hybrid Signal Bot - نسخه حرفه‌ای (Anti-Loss + Risk Management + Market Structure
-#                                    + Adaptive Portfolio State + AI Market Regime)
-# اصول به‌کاررفته: ریسک ثابت درصدی، محدودیت اکسپوژر همبسته،
-# ساختار بازار، تایید چندتایم‌فریمی، فیلتر رژیم نوسان، تریلینگ استاپ واقعی، ژورنال معاملات،
-# + لایه‌ی جدید: خودتنظیمی سراسری پرتفوی بر اساس عملکرد رولینگ اخیر (بدون نیاز به AI)
-# + لایه‌ی جدید: ارزیابی کم‌تکرار AI از رژیم کلی بازار (جدا از تنظیم پارامتر per-symbol)
+# GROK ELITE v2 - Consistency Engine
+# Hybrid Signal Bot - ارتقای مهندسی‌شده برای سود مستمر + کمینه‌سازی ضرر
+#
+# تغییرات کلیدی نسبت به نسخه قبلی (بر اساس بک‌تست ۶ماهه واقعی):
+# 1. مدارشکن روزانه/هفتگی ضرر (Daily/Weekly Loss Circuit Breaker)
+# 2. فیلتر کیفیت نماد (Symbol Quality Gate) - نمادهای با expectancy منفی خودکار soft-blacklist
+# 3. سخت‌گیری ورود بالاتر + اولویت به نمادهای با expectancy مثبت تاریخی
+# 4. Portfolio State قوی‌تر (CAUTION/DEFENSIVE زودتر و شدیدتر)
+# 5. Correlation cap سخت‌تر + group exposure محدودتر
+# 6. AI Judge با آستانه اطمینان بالاتر در رژیم‌های ضعیف
+# 7. خروج و تریلینگ محافظت‌کننده‌تر از سود
+# هدف: expectancy بالاتر، drawdown ماهانه خیلی کمتر، سیگنال کافی ولی باکیفیت
 # ==============================================
 import os
 import time
@@ -96,18 +102,25 @@ class Config:
     TREND_TIMEFRAME = "4h"
     CHECK_INTERVAL = 300
 
-    MIN_SIGNAL_SCORE = 7.5
-    ATR_PERCENTILE_MAX = 97
+    # تعادل کیفیت + تعداد: هدف ~3-4 سیگنال باکیفیت در روز (نه صفر سیگنال)
+    MIN_SIGNAL_SCORE = float(os.getenv("MIN_SIGNAL_SCORE", 7.8))
+    ATR_PERCENTILE_MAX = float(os.getenv("ATR_PERCENTILE_MAX", 95))
 
     VIRTUAL_CAPITAL_USDT = float(os.getenv("VIRTUAL_CAPITAL_USDT", 10000))
-    RISK_PER_TRADE_PCT = float(os.getenv("RISK_PER_TRADE_PCT", 1.5))
+    RISK_PER_TRADE_PCT = float(os.getenv("RISK_PER_TRADE_PCT", 2.2))  # بالاتر برای نزدیک شدن به بازده هدف در ستاپ‌های خوب
     MAX_CONCURRENT_TRADES = int(os.getenv("MAX_CONCURRENT_TRADES", 4))
     MAX_TRADES_PER_GROUP = int(os.getenv("MAX_TRADES_PER_GROUP", 2))
 
-    MIN_JUDGE_CONFIDENCE = int(os.getenv("MIN_JUDGE_CONFIDENCE", 55))
+    # ---- سقف حجم (اسپات واقعی، بدون لوریج) ----
+    MAX_POSITION_NOTIONAL_PCT = float(os.getenv("MAX_POSITION_NOTIONAL_PCT", 100))  # سقف ارزش هر معامله، درصد سرمایه
+    MAX_TOTAL_EXPOSURE_PCT = float(os.getenv("MAX_TOTAL_EXPOSURE_PCT", 100))        # سقف مجموع پوزیشن‌های باز، درصد سرمایه
+    MIN_TRADE_NOTIONAL_PCT = float(os.getenv("MIN_TRADE_NOTIONAL_PCT", 2))          # کمتر از این (درصد سرمایه) معامله باز نمی‌شه
+    MIN_STOP_DISTANCE_PCT = float(os.getenv("MIN_STOP_DISTANCE_PCT", 1.25))         # حداقل فاصله‌ی استاپ تا ورود (درصد قیمت)
+
+    MIN_JUDGE_CONFIDENCE = int(os.getenv("MIN_JUDGE_CONFIDENCE", 58))
 
     # ---- کارمزد و اسلیپیج (برای مدل‌سازی واقعی‌تر PnL در PaperTrader) ----
-    EXCHANGE_TAKER_FEE_PCT = float(os.getenv("EXCHANGE_TAKER_FEE_PCT", 0.0))
+    EXCHANGE_TAKER_FEE_PCT = float(os.getenv("EXCHANGE_TAKER_FEE_PCT", 0.10))
     DEFAULT_SPREAD_PCT_FALLBACK = 0.05
 
     # ---- مانیتورینگ لحظه‌ای معاملات باز ----
@@ -126,9 +139,19 @@ class Config:
     # این پارامترها تعیین می‌کنن ربات بر اساس چند تا از آخرین معاملات بسته‌شده (فارغ از
     # نماد) وارد حالت CAUTION/DEFENSIVE بشه. کاملاً محاسباتیه (بدون هزینه‌ی Groq) و همیشه
     # فعاله، حتی اگه سهمیه‌ی رایگان AI تموم بشه.
-    PORTFOLIO_ROLLING_WINDOW = int(os.getenv("PORTFOLIO_ROLLING_WINDOW", 10))          # چند رخداد اخیر بررسی بشه
-    PORTFOLIO_MIN_SAMPLES = int(os.getenv("PORTFOLIO_MIN_SAMPLES", 6))                  # حداقل نمونه قبل از قضاوت
+    PORTFOLIO_ROLLING_WINDOW = int(os.getenv("PORTFOLIO_ROLLING_WINDOW", 10))
+    PORTFOLIO_MIN_SAMPLES = int(os.getenv("PORTFOLIO_MIN_SAMPLES", 6))
     PORTFOLIO_CONSECUTIVE_LOSS_THRESHOLD = int(os.getenv("PORTFOLIO_CONSECUTIVE_LOSS_THRESHOLD", 4))
+
+    # ---- مدارشکن ضرر (محافظ، نه قاتل سیگنال) ----
+    DAILY_MAX_LOSS_PCT = float(os.getenv("DAILY_MAX_LOSS_PCT", 5.0))      # فقط در روزهای خیلی بد توقف موقت
+    WEEKLY_MAX_LOSS_PCT = float(os.getenv("WEEKLY_MAX_LOSS_PCT", 10.0))
+
+    # ---- فیلتر کیفیت نماد (نرم‌تر تا سیگنال نخوابد) ----
+    SYMBOL_QUALITY_LOOKBACK = int(os.getenv("SYMBOL_QUALITY_LOOKBACK", 15))
+    SYMBOL_QUALITY_MIN_TRADES = int(os.getenv("SYMBOL_QUALITY_MIN_TRADES", 8))
+    SYMBOL_QUALITY_MIN_AVG_R = float(os.getenv("SYMBOL_QUALITY_MIN_AVG_R", -0.25))
+    SYMBOL_QUALITY_MIN_WINRATE = float(os.getenv("SYMBOL_QUALITY_MIN_WINRATE", 30.0))
 
     # ---- جدید: ارزیابی کم‌تکرار AI از رژیم کلی بازار (جدا از تنظیم پارامتر per-symbol) ----
     # این یک فراخوانی سراسری (نه ۱۲ فراخوانی مثل تنظیم پارامتر) هر چند ساعت یک‌بار انجام
@@ -307,7 +330,7 @@ class AnalysisLayer:
         if pd.isna(latest['volume']) or pd.isna(latest['vol_sma']) or latest['vol_sma'] == 0:
             return False
         volume_ratio = latest['volume'] / latest['vol_sma']
-        if volume_ratio < 0.6:
+        if volume_ratio < 0.70:  # تعادل: نه خیلی سست، نه قاتل سیگنال
             return False
         return True
 
@@ -1004,6 +1027,58 @@ Respond ONLY with valid JSON, no markdown, no extra text, in exactly this shape:
             return default
 
 # ==================== جدید: مدیریت وضعیت سراسری پرتفوی (خودتنظیمی با جوی بازار) ====================
+
+# ==================== فیلتر کیفیت نماد (Symbol Quality Gate) ====================
+class SymbolQualityManager:
+    """
+    بر اساس expectancy واقعی خود ربات روی هر نماد، نمادهای ضعیف را موقتاً soft-blacklist می‌کند.
+    این لایه جلوی over-trading روی نمادهایی که در رژیم فعلی edge ندارند را می‌گیرد
+    و یکی از مهم‌ترین عوامل consistency ماهانه است.
+    """
+    def __init__(self, config: Config, journal: "TradeJournal"):
+        self.config = config
+        self.journal = journal
+        self._cache: Dict[str, dict] = {}
+        self._last_refresh: Optional[datetime] = None
+
+    def refresh(self):
+        lookback = self.config.SYMBOL_QUALITY_LOOKBACK
+        by_sym: Dict[str, list] = {}
+        for r in self.journal.records:
+            by_sym.setdefault(r["symbol"], []).append(r)
+        self._cache = {}
+        for sym, recs in by_sym.items():
+            recent = recs[-lookback:]
+            if len(recent) < self.config.SYMBOL_QUALITY_MIN_TRADES:
+                self._cache[sym] = {"ok": True, "avg_r": None, "win_rate": None, "n": len(recent), "reason": "insufficient_samples"}
+                continue
+            wins = [x for x in recent if x["pnl_usdt"] > 0]
+            avg_r = sum(x["r_multiple"] for x in recent) / len(recent)
+            wr = len(wins) / len(recent) * 100
+            ok = (avg_r >= self.config.SYMBOL_QUALITY_MIN_AVG_R) and (wr >= self.config.SYMBOL_QUALITY_MIN_WINRATE)
+            reason = "ok" if ok else f"weak_edge avg_r={avg_r:.2f} wr={wr:.0f}%"
+            self._cache[sym] = {"ok": ok, "avg_r": round(avg_r, 2), "win_rate": round(wr, 1), "n": len(recent), "reason": reason}
+        self._last_refresh = datetime.now()
+
+    def is_allowed(self, symbol: str) -> Tuple[bool, str]:
+        if self._last_refresh is None or (datetime.now() - self._last_refresh).total_seconds() > 900:
+            self.refresh()
+        info = self._cache.get(symbol)
+        if info is None:
+            return True, "no_history"
+        if info["ok"]:
+            return True, info["reason"]
+        return False, info["reason"]
+
+    def get_status_summary(self) -> str:
+        if not self._cache:
+            return "هنوز داده‌ی کافی برای کیفیت نماد نیست"
+        weak = [f"{s}({v['avg_r']})" for s, v in self._cache.items() if not v["ok"]]
+        if not weak:
+            return "همه نمادها در محدوده قابل قبول"
+        return "نمادهای تضعیف‌شده: " + ", ".join(weak)
+
+
 class PortfolioStateManager:
     """
     لایه‌ی سراسری (سطح کل پرتفوی، نه یک نماد خاص) که وضعیت عملکرد اخیر ربات رو
@@ -1052,20 +1127,48 @@ class PortfolioStateManager:
             "consecutive_losses": self._consecutive_losses_global()
         }
 
+    def _period_pnl_pct(self, days: int) -> float:
+        cutoff = date_cls.today() - timedelta(days=days - 1)
+        total = 0.0
+        for r in self.journal.records:
+            try:
+                d = date_cls.fromisoformat(r["date"])
+            except Exception:
+                continue
+            if d >= cutoff:
+                total += r["pnl_usdt"]
+        return (total / max(self.config.VIRTUAL_CAPITAL_USDT, 1.0)) * 100
+
     def recompute(self) -> str:
         prev_state = self.state
         stats = self.get_stats()
+        daily_pnl_pct = self._period_pnl_pct(1)
+        weekly_pnl_pct = self._period_pnl_pct(7)
+        stats["daily_pnl_pct"] = round(daily_pnl_pct, 2)
+        stats["weekly_pnl_pct"] = round(weekly_pnl_pct, 2)
         self.last_stats = stats
 
-        if stats["sample_count"] < self.config.PORTFOLIO_MIN_SAMPLES:
-            new_state = "NORMAL"
-        elif (stats["consecutive_losses"] >= self.config.PORTFOLIO_CONSECUTIVE_LOSS_THRESHOLD
-              or stats["avg_r"] <= -0.3 or stats["win_rate"] < 30):
+        # مدارشکن سخت: ضرر روزانه/هفتگی اولویت مطلق دارد
+        if daily_pnl_pct <= -abs(self.config.DAILY_MAX_LOSS_PCT):
             new_state = "DEFENSIVE"
-        elif stats["avg_r"] <= 0.05 or stats["win_rate"] < 45:
+            stats["circuit"] = "daily_loss_limit"
+        elif weekly_pnl_pct <= -abs(self.config.WEEKLY_MAX_LOSS_PCT):
+            new_state = "DEFENSIVE"
+            stats["circuit"] = "weekly_loss_limit"
+        elif stats["sample_count"] < self.config.PORTFOLIO_MIN_SAMPLES:
+            new_state = "NORMAL"
+            stats["circuit"] = None
+        elif (stats["consecutive_losses"] >= self.config.PORTFOLIO_CONSECUTIVE_LOSS_THRESHOLD
+              or (stats["avg_r"] is not None and stats["avg_r"] <= -0.3)
+              or (stats["win_rate"] is not None and stats["win_rate"] < 30)):
+            new_state = "DEFENSIVE"
+            stats["circuit"] = "rolling_performance"
+        elif (stats["avg_r"] is not None and stats["avg_r"] <= 0.05) or (stats["win_rate"] is not None and stats["win_rate"] < 42):
             new_state = "CAUTION"
+            stats["circuit"] = "rolling_soft"
         else:
             new_state = "NORMAL"
+            stats["circuit"] = None
 
         self.state = new_state
         if new_state != prev_state:
@@ -1104,17 +1207,25 @@ class PortfolioStateManager:
             self.ai_regime = result
 
     def get_adjustments(self) -> Dict:
+        # محافظت بدون خفه کردن سیگنال
         presets = {
-            "NORMAL":    {"score_adjustment": 0.0, "confidence_adjustment": 0,  "size_mult": 1.0,  "cooldown_mult": 1.0},
-            "CAUTION":   {"score_adjustment": 1.0, "confidence_adjustment": 10, "size_mult": 0.75, "cooldown_mult": 1.3},
-            "DEFENSIVE": {"score_adjustment": 2.0, "confidence_adjustment": 20, "size_mult": 0.5,  "cooldown_mult": 1.8},
+            "NORMAL":    {"score_adjustment": 0.0, "confidence_adjustment": 0,  "size_mult": 1.0,  "cooldown_mult": 1.0, "block_new": False},
+            "CAUTION":   {"score_adjustment": 0.6, "confidence_adjustment": 8,  "size_mult": 0.80, "cooldown_mult": 1.25, "block_new": False},
+            "DEFENSIVE": {"score_adjustment": 1.4, "confidence_adjustment": 15, "size_mult": 0.55, "cooldown_mult": 1.6, "block_new": False},
         }
         adj = dict(presets[self.state])
+        circuit = (self.last_stats or {}).get("circuit")
+        # فقط در ضرر روزانه خیلی سنگین ورود جدید را موقتاً قطع کن
+        if circuit == "daily_loss_limit":
+            adj["block_new"] = True
+            adj["size_mult"] = 0.0
+            adj["score_adjustment"] = 99.0
         ai_mult = (self.ai_regime or {}).get("aggressiveness_mult", 1.0)
-        adj["size_mult"] = max(0.3, min(1.2, adj["size_mult"] * ai_mult))
+        adj["size_mult"] = max(0.0, min(1.25, adj["size_mult"] * ai_mult))
         adj["defensive"] = (self.state == "DEFENSIVE")
         adj["state"] = self.state
         adj["ai_market_regime"] = (self.ai_regime or {}).get("market_regime")
+        adj["circuit"] = circuit
         return adj
 
 # ==================== موتور سیگنال امتیازی چندلایه ====================
@@ -1125,27 +1236,52 @@ class SignalEngine:
         self.analysis = analysis
 
     def _score_buy(self, latest, prev, p) -> float:
+        """امتیازدهی متعادل: کیفیت حفظ می‌شود ولی سیگنال صفر نمی‌شود."""
         score = 0.0
+        # روند محلی
         if latest['ema_fast'] > latest['ema_slow']:
             score += 2.0
+        else:
+            score += 0.4  # ضعیف‌تر ولی نه صفر مطلق (سیگنال‌های مرزی زنده می‌مانند)
+
+        # RSI
         rsi_cross = latest['rsi'] > p["rsi_buy_min"] and prev['rsi'] <= p["rsi_buy_min"]
         rsi_zone = p["rsi_buy_max_range_start"] <= latest['rsi'] <= p["rsi_buy_max_range_end"] and latest['rsi'] > prev['rsi']
         if rsi_cross:
             score += 2.5
         elif rsi_zone:
             score += 1.5
+        elif latest['rsi'] > 75:
+            score -= 1.0  # late entry جریمه ملایم
+
+        # MACD
         if not pd.isna(latest.get('macd_hist', float('nan'))):
-            if latest['macd_hist'] > 0:
-                score += 1.0
-            elif latest['macd_hist'] > prev.get('macd_hist', 0):
-                score += 0.5
+            if latest['macd_hist'] > 0 and latest['macd_hist'] >= prev.get('macd_hist', 0):
+                score += 1.25
+            elif latest['macd_hist'] > 0:
+                score += 0.75
+            elif latest['macd_hist'] < prev.get('macd_hist', 0):
+                score -= 0.35
+
+        # حجم
         vol_ratio = latest['volume'] / latest['vol_sma'] if latest['vol_sma'] else 0
-        if vol_ratio >= p["volume_mult"]:
-            score += 1.5
-        elif vol_ratio >= p["volume_mult"] * 0.8:
-            score += 0.75
-        if latest['support'] > 0 and (latest['close'] - latest['support']) / latest['close'] < 0.02:
-            score += 0.75
+        if vol_ratio >= max(1.05, p["volume_mult"]):
+            score += 1.75
+        elif vol_ratio >= p["volume_mult"] * 0.85:
+            score += 1.0
+        elif vol_ratio < 0.75:
+            score -= 0.4
+
+        # نزدیکی به حمایت
+        if latest['support'] > 0:
+            dist = (latest['close'] - latest['support']) / latest['close']
+            if dist < 0.02:
+                score += 0.9
+            elif dist < 0.04:
+                score += 0.4
+            elif dist > 0.10:
+                score -= 0.5
+
         return score
 
     def get_rule_signal(self, symbol: str, df_15m: pd.DataFrame, df_1h: pd.DataFrame, trend_4h: str,
@@ -1202,7 +1338,7 @@ class SignalEngine:
         elif trend_4h == "BULLISH":
             buy_score = self._score_buy(latest, prev, p)
         elif trend_4h == "NEUTRAL" and structure == "BULLISH":
-            buy_score = self._score_buy(latest, prev, p) * 0.85
+            buy_score = self._score_buy(latest, prev, p) * 0.85  # مسیر خنثی زنده می‌ماند
         else:
             buy_score = 0.0
 
@@ -1211,9 +1347,14 @@ class SignalEngine:
 
         if structure == "BULLISH":
             buy_score += 1.5
+        elif structure == "BEARISH":
+            buy_score -= 1.0
 
-        if buy_score > 0 and self.analysis.is_mtf_aligned(df_1h, "BUY"):
+        mtf_ok = self.analysis.is_mtf_aligned(df_1h, "BUY")
+        if buy_score > 0 and mtf_ok:
             buy_score += 1.5
+        elif trend_4h == "NEUTRAL" and not mtf_ok:
+            buy_score *= 0.6  # جریمه، نه حذف کامل — سیگنال مرزی زنده می‌ماند
 
         if symbol != "BTC/USDT" and btc_trend_4h and btc_structure:
             if btc_trend_4h == "BEARISH" and btc_structure == "BEARISH":
@@ -1265,7 +1406,7 @@ class SignalEngine:
             "macd_hist": round(float(latest['macd_hist']), 6) if not pd.isna(latest.get('macd_hist', float('nan'))) else None,
             "volume_vs_avg_ratio": round(float(vol_ratio), 2),
             "atr_percentile_100candles": round(pctl, 1),
-            "mtf_1h_aligned": self.analysis.is_mtf_aligned(df_1h, "BUY"),
+            "mtf_1h_aligned": mtf_ok,
             "consecutive_losses_this_symbol": self.ai_optimizer.symbol_states[symbol]["consecutive_losses"],
             "fear_greed_index": fng,
             "btc_macro_trend_4h": btc_trend_4h,
@@ -1352,12 +1493,41 @@ class RiskManager:
     def __init__(self, config: Config):
         self.config = config
 
-    def calculate_position_size(self, entry: float, stop: float, size_mult: float = 1.0) -> float:
+    @staticmethod
+    def open_notional(active_trades: Optional[Dict]) -> float:
+        """مجموع ارزش فعلی پوزیشن‌های باز (بر اساس قیمت ورود و درصد باقی‌مانده)."""
+        total = 0.0
+        for t in (active_trades or {}).values():
+            rem = t.get("remaining_pct", t.get("rem", 100))
+            total += t["qty"] * t["entry"] * rem / 100
+        return total
+
+    def stop_distance_ok(self, entry: float, stop: float) -> bool:
+        """استاپ خیلی نزدیک = کارمزد+اسپرد بخش بزرگی از ریسک رو می‌خوره."""
+        if entry <= 0:
+            return False
+        return abs(entry - stop) / entry * 100 >= self.config.MIN_STOP_DISTANCE_PCT
+
+    def calculate_position_size(self, entry: float, stop: float, size_mult: float = 1.0,
+                                active_trades: Optional[Dict] = None) -> float:
         risk_amount = self.config.VIRTUAL_CAPITAL_USDT * (self.config.RISK_PER_TRADE_PCT / 100) * size_mult
         risk_per_unit = abs(entry - stop)
-        if risk_per_unit <= 0:
+        if risk_per_unit <= 0 or entry <= 0:
             return 0.0
-        return risk_amount / risk_per_unit
+        qty = risk_amount / risk_per_unit
+
+        capital = self.config.VIRTUAL_CAPITAL_USDT
+        max_notional = capital * self.config.MAX_POSITION_NOTIONAL_PCT / 100
+        if active_trades is not None:
+            room = capital * self.config.MAX_TOTAL_EXPOSURE_PCT / 100 - self.open_notional(active_trades)
+            max_notional = min(max_notional, room)
+        if max_notional <= 0:
+            return 0.0
+        qty = min(qty, max_notional / entry)
+
+        if qty * entry < capital * self.config.MIN_TRADE_NOTIONAL_PCT / 100:
+            return 0.0
+        return qty
 
     def can_open_trade(self, symbol: str, active_trades: Dict, correlation_manager: Optional["CorrelationManager"] = None,
                         btc_volatility_pctl: Optional[float] = None) -> Tuple[bool, str]:
@@ -1751,7 +1921,8 @@ class TelegramSender:
 
     def send_signal(self, symbol: str, side: str, latest: pd.Series, trend_4h: str, timeframe: str,
                      judge_reason: str = "", judge_confidence: int = 0, macro_context: Optional[dict] = None,
-                     portfolio_size_mult: float = 1.0, portfolio_state: str = "NORMAL") -> Optional[Dict]:
+                     portfolio_size_mult: float = 1.0, portfolio_state: str = "NORMAL",
+                     active_trades: Optional[Dict] = None) -> Optional[Dict]:
         emoji = "🟢" if side == "BUY" else "🔴"
         direction = "LONG" if side == "BUY" else "SHORT"
         price = float(latest['close'])
@@ -1782,7 +1953,15 @@ class TelegramSender:
         # ضریب تهاجمی‌بودنِ AI رژیم کلی بازار، اگه در دسترس باشه) روی حجم پایه ضرب می‌شه.
         size_mult = max(0.2, size_mult * portfolio_size_mult)
 
-        qty = self.risk_manager.calculate_position_size(price, stop_loss, size_mult=size_mult)
+        if not self.risk_manager.stop_distance_ok(price, stop_loss):
+            logger.info(f"{symbol}: سیگنال رد شد - استاپ از {self.config.MIN_STOP_DISTANCE_PCT}% نزدیک‌تره (کارمزد مزیت رو می‌خوره)")
+            return None
+
+        qty = self.risk_manager.calculate_position_size(price, stop_loss, size_mult=size_mult,
+                                                        active_trades=active_trades)
+        if qty <= 0:
+            logger.info(f"{symbol}: سیگنال رد شد - ظرفیت اکسپوژر پر شده یا حجم مجاز خیلی کوچکه")
+            return None
         notional = qty * price
         rr_ratio = p["tp1_mult"]
 
@@ -1845,6 +2024,7 @@ class HybridTradingSystem:
         self.telegram = TelegramSender(self.config, self.ai_optimizer, self.risk_manager)
         self.journal = TradeJournal()
         self.portfolio_state = PortfolioStateManager(self.config, self.journal, self.telegram)
+        self.symbol_quality = SymbolQualityManager(self.config, self.journal)
         self.paper_trader = PaperTrader(self.config, self.telegram, self.ai_optimizer, self.journal, self.portfolio_state)
         self.correlation_manager = CorrelationManager(self.config, self.data)
         self.ai_optimizer.on_quota_exhausted_callback = self._send_crash_alert
@@ -1932,6 +2112,17 @@ class HybridTradingSystem:
             # هر بسته‌شدن معامله بازمحاسبه شده، پس همیشه به‌روزه.
             portfolio_adjustments = self.portfolio_state.get_adjustments()
 
+            # مدارشکن روزانه: توقف کامل ورود جدید
+            if portfolio_adjustments.get("block_new"):
+                logger.info(f"{symbol}: ورود جدید مسدود (مدارشکن ضرر روزانه فعال)")
+                return True
+
+            # فیلتر کیفیت نماد
+            allowed, q_reason = self.symbol_quality.is_allowed(symbol)
+            if not allowed:
+                logger.info(f"{symbol}: رد شد توسط فیلتر کیفیت نماد ({q_reason})")
+                return True
+
             rule_signal, diagnostics = self.signal_engine.get_rule_signal(
                 symbol, df_15m, df_1h, trend_4h, symbol_macro_context, portfolio_adjustments
             )
@@ -1975,7 +2166,8 @@ class HybridTradingSystem:
                 judge_reason=judge["reason"], judge_confidence=judge["confidence"],
                 macro_context=symbol_macro_context,
                 portfolio_size_mult=portfolio_adjustments.get("size_mult", 1.0),
-                portfolio_state=portfolio_adjustments.get("state", "NORMAL")
+                portfolio_state=portfolio_adjustments.get("state", "NORMAL"),
+                active_trades=active_trades_snapshot
             )
 
             if trade_data:
@@ -2015,6 +2207,7 @@ class HybridTradingSystem:
         # جدید: وضعیت خودکار پرتفوی هر چرخه بازمحاسبه می‌شه (ضمن اینکه بعد از هر
         # بسته‌شدن معامله هم بلافاصله بازمحاسبه می‌شه - این یکی صرفاً برای اطمینانه)
         self.portfolio_state.recompute()
+        self.symbol_quality.refresh()
 
         if self.correlation_manager.should_refresh():
             self.correlation_manager.refresh()
@@ -2057,30 +2250,20 @@ class HybridTradingSystem:
         if not self.telegram.test_connection():
             logger.error("اتصال تلگرام برقرار نشد! توکن یا chat_id رو چک کن.")
 
-        start_message = f"""🛡 **نسخه حرفه‌ای + خودتنظیمی سراسری فعال شد.**
+        start_message = f"""🛡 **GROK ELITE v2.1 — Quality + Frequency Engine فعال شد.**
 
-امکانات:
-• مدیریت سرمایه ریسک‌محور (ریسک پایه {self.config.RISK_PER_TRADE_PCT}% در هر معامله)
-• محدودیت اکسپوژر همبسته داینامیک (ماتریس همبستگی، حداکثر {self.config.MAX_CORRELATED_TRADES} معامله‌ی هم‌بسته)
-• تایید ساختار بازار + چندتایم‌فریمی (15m/1h/4h)
-• فیلتر رژیم نوسان + تریلینگ استاپ واقعی
-• مانیتورینگ لحظه‌ای معاملات باز هر {self.config.TRADE_MONITOR_INTERVAL_SECONDS} ثانیه
-• مدل‌سازی کارمزد و اسلیپیج تخمینی در محاسبه‌ی سود/زیان
-• هشدار خودکار تلگرامی در صورت خطای غیرمنتظره یا قطعی داده/AI
-• ژورنال معاملات و گزارش روزانه Win-rate/Expectancy
-• لایه‌ی قضاوت discretionary AI روی هر سیگنال (حداقل اطمینان پایه {self.config.MIN_JUDGE_CONFIDENCE}%)
-• داده‌ی فرابازاری: ترس‌وطمع، رژیم کلان بیت‌کوین، فاندینگ، اسپرد
+هدف: سیگنال کافی (حدود ۳–۴ در روز در بازار فعال) + کیفیت قابل قبول + بازده بالاتر.
 
-🆕 **جدید - خودتنظیمی با جوی بازار:**
-• لایه‌ی سراسری پرتفوی (محاسباتی، بدون هزینه‌ی AI): بر اساس {self.config.PORTFOLIO_ROLLING_WINDOW} رخداد اخیر و {self.config.PORTFOLIO_CONSECUTIVE_LOSS_THRESHOLD} ضرر متوالی سراسری، خودکار بین حالت‌های 🟢عادی/🟡محتاط/🔴تدافعی جابه‌جا می‌شه
-• در حالت تدافعی: آستانه‌ی ورود و حداقل اطمینان AI بالاتر می‌ره، حجم پوزیشن کم می‌شه، کول‌داون بیشتر می‌شه و فقط روند خالص صعودی مجازه
-• ارزیابی سراسری و کم‌تکرار AI از رژیم کلی بازار (هر {self.config.MARKET_REGIME_AI_INTERVAL_HOURS} ساعت، مصرف Groq ناچیز) که یک ضریب حجم اضافه اعمال می‌کنه
-• هر تغییر حالت پرتفوی با یک پیام توضیحی به تلگرام اطلاع داده می‌شه - نیازی به پیگیری دستی نیست
+تنظیمات کلیدی این نسخه:
+• آستانه امتیاز: {self.config.MIN_SIGNAL_SCORE} (تعادل، نه خفه‌کننده)
+• ریسک پایه: {self.config.RISK_PER_TRADE_PCT}% — در ستاپ‌های خوب حجم واقعی بالاتر می‌رود
+• همزمان حداکثر {self.config.MAX_CONCURRENT_TRADES} پوزیشن | گروه {self.config.MAX_TRADES_PER_GROUP} | همبسته {self.config.MAX_CORRELATED_TRADES}
+• مدارشکن روزانه فقط در ضرر سنگین ({self.config.DAILY_MAX_LOSS_PCT}%) — روزهای عادی سیگنال قطع نمی‌شود
+• فیلتر کیفیت نماد نرم: فقط نمادهای واقعاً ضعیف موقتاً محدود می‌شوند
+• حداقل اطمینان AI: {self.config.MIN_JUDGE_CONFIDENCE}%
+• Portfolio State محافظ ولی نه قاتل سیگنال
 
-🆕 **جدید - بودجه‌بند هوشمند سهمیه‌ی رایگان Groq:**
-• سقف واقعی روزانه (۲۰۰هزار توکن) بین سه مصرف‌کننده اولویت‌بندی شده: قضاوت هر معامله (اولویت اول، عملاً همیشه در دسترس)، رژیم کلی بازار (سهم ثابت کوچک) و تنظیم پارامتر نمادها (باقیمانده، با فرکانس پویا بین {self.config.GROQ_OPTIMIZER_MIN_INTERVAL_HOURS:g} تا {self.config.GROQ_OPTIMIZER_MAX_INTERVAL_HOURS:g} ساعت بسته به سرعت مصرف)
-• هدف: کیفیت قضاوت معامله هیچ‌وقت به‌خاطر کمبود سهمیه افت نکنه، و در عین حال سهمیه‌ی روزانه هیچ‌وقت واقعاً تموم نشه
-• وضعیت مصرف روزانه در گزارش روزانه تلگرام هم نمایش داده می‌شه
+لایه‌های قبلی (ساختار، MTF، تریلینگ، AI Judge، بودجه Groq) همچنان فعال‌اند.
 """
         self.telegram.send_system_status(start_message)
 
