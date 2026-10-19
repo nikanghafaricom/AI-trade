@@ -106,6 +106,12 @@ class Config:
 
     MIN_JUDGE_CONFIDENCE = int(os.getenv("MIN_JUDGE_CONFIDENCE", 55))
 
+    # ---- سقف سیگنال روزانه فقط وقتی بازار بد است ----
+    # وقتی رژیم AI محتاط/تدافعی باشد یا حالت پرتفوی CAUTION/DEFENSIVE، حداکثر این تعداد
+    # سیگنال در ۲۴ ساعت مجاز است. در شرایط خوب بازار این محدودیت اعمال نمی‌شود.
+    BAD_MARKET_MAX_SIGNALS_PER_DAY = int(os.getenv("BAD_MARKET_MAX_SIGNALS_PER_DAY", 2))
+    BAD_MARKET_AGGRESSIVENESS_THRESHOLD = float(os.getenv("BAD_MARKET_AGGRESSIVENESS_THRESHOLD", 0.75))
+
     # ---- کارمزد و اسلیپیج (برای مدل‌سازی واقعی‌تر PnL در PaperTrader) ----
     EXCHANGE_TAKER_FEE_PCT = float(os.getenv("EXCHANGE_TAKER_FEE_PCT", 0.0))
     DEFAULT_SPREAD_PCT_FALLBACK = 0.05
@@ -1872,12 +1878,42 @@ class HybridTradingSystem:
         self.last_summary_date: Optional[str] = date_cls.today().isoformat()
         self.consecutive_full_cycle_failures = 0
         self.data_outage_alert_sent = False
+        # شمارنده سیگنال روزانه (فقط وقتی بازار بد است سقف اعمال می‌شود)
+        self._signals_today_date: Optional[str] = date_cls.today().isoformat()
+        self._signals_today_count: int = 0
 
     def _send_crash_alert(self, text: str):
         try:
             self.telegram.send_error_alert(text)
         except Exception:
             logger.error("حتی ارسال هشدار خطا هم ناموفق بود.")
+
+    def _roll_daily_signal_counter(self):
+        today = date_cls.today().isoformat()
+        if self._signals_today_date != today:
+            self._signals_today_date = today
+            self._signals_today_count = 0
+
+    def _is_bad_market(self, portfolio_adjustments: dict) -> bool:
+        """بازار بد = حالت پرتفوی محتاط/تدافعی یا ضریب تهاجمی‌بودن AI پایین."""
+        state = portfolio_adjustments.get("state", "NORMAL")
+        if state in ("CAUTION", "DEFENSIVE"):
+            return True
+        ai_mult = (self.portfolio_state.ai_regime or {}).get("aggressiveness_mult", 1.0)
+        if ai_mult < self.config.BAD_MARKET_AGGRESSIVENESS_THRESHOLD:
+            return True
+        return False
+
+    def _can_send_more_signals_today(self, portfolio_adjustments: dict) -> Tuple[bool, str]:
+        """در بازار بد حداکثر BAD_MARKET_MAX_SIGNALS_PER_DAY سیگنال در روز؛ در بازار خوب بدون سقف سخت."""
+        self._roll_daily_signal_counter()
+        if not self._is_bad_market(portfolio_adjustments):
+            return True, ""
+        limit = self.config.BAD_MARKET_MAX_SIGNALS_PER_DAY
+        if self._signals_today_count >= limit:
+            return False, (f"سقف سیگنال روزانه در بازار بد پر شده "
+                           f"({self._signals_today_count}/{limit}) - تا فردا صبر می‌کنیم")
+        return True, ""
 
     def _start_trade_monitor_thread(self):
         def monitor_loop():
@@ -1988,6 +2024,12 @@ class HybridTradingSystem:
                 logger.info(f"{symbol}: سیگنال {rule_signal} توسط لایه‌ی قضاوت AI رد شد (اطمینان {judge['confidence']}%، حداقل لازم {required_confidence}%) - {judge['reason']}")
                 return True
 
+            # سقف سیگنال روزانه فقط وقتی بازار بد است (محتاط/تدافعی یا AI تهاجمی پایین)
+            can_more, quota_reason = self._can_send_more_signals_today(portfolio_adjustments)
+            if not can_more:
+                logger.info(f"{symbol}: سیگنال {rule_signal} رد شد - {quota_reason}")
+                return True
+
             latest = df_15m.iloc[-1]
             trade_data = self.telegram.send_signal(
                 symbol, rule_signal, latest, trend_4h, self.config.ENTRY_TIMEFRAME,
@@ -2011,6 +2053,11 @@ class HybridTradingSystem:
                     spread_pct_at_entry=symbol_macro_context.get("spread_pct")
                 )
                 self.last_signal_time[symbol] = now
+                self._roll_daily_signal_counter()
+                self._signals_today_count += 1
+                if self._is_bad_market(portfolio_adjustments):
+                    logger.info(f"سیگنال روزانه در بازار بد: {self._signals_today_count}/"
+                                f"{self.config.BAD_MARKET_MAX_SIGNALS_PER_DAY}")
 
             return True
 
@@ -2094,6 +2141,7 @@ class HybridTradingSystem:
 • لایه‌ی سراسری پرتفوی (محاسباتی، بدون هزینه‌ی AI): بر اساس {self.config.PORTFOLIO_ROLLING_WINDOW} رخداد اخیر و {self.config.PORTFOLIO_CONSECUTIVE_LOSS_THRESHOLD} ضرر متوالی سراسری، خودکار بین حالت‌های 🟢عادی/🟡محتاط/🔴تدافعی جابه‌جا می‌شه
 • در حالت تدافعی: آستانه‌ی ورود و حداقل اطمینان AI بالاتر می‌ره، حجم پوزیشن کم می‌شه، کول‌داون بیشتر می‌شه و فقط روند خالص صعودی مجازه
 • ارزیابی سراسری و کم‌تکرار AI از رژیم کلی بازار (هر {self.config.MARKET_REGIME_AI_INTERVAL_HOURS} ساعت، مصرف Groq ناچیز) که یک ضریب حجم اضافه اعمال می‌کنه
+• **سقف سیگنال روزانه فقط در بازار بد:** وقتی رژیم محتاط/تدافعی یا ضریب تهاجمی‌بودن AI زیر {self.config.BAD_MARKET_AGGRESSIVENESS_THRESHOLD:g} باشد، حداکثر {self.config.BAD_MARKET_MAX_SIGNALS_PER_DAY} سیگنال در ۲۴ ساعت. در شرایط خوب بازار این سقف برداشته می‌شود
 • هر تغییر حالت پرتفوی با یک پیام توضیحی به تلگرام اطلاع داده می‌شه - نیازی به پیگیری دستی نیست
 
 🆕 **جدید - بودجه‌بند هوشمند سهمیه‌ی رایگان Groq:**
