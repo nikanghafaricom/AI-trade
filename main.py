@@ -561,38 +561,57 @@ class AIParameterOptimizer:
         self._consecutive_connection_failures = 0
         self._connection_alert_sent = False
 
+        # ---- پارامترهای بهینه‌شده یک‌باره بر اساس رژیم فعلی بازار (۱۹ اکتبر ۲۰۲۶) ----
+        # رژیم: چوپی/رنج، دامیننس BTC بالا (~60%)، Fear&Greed خنثی تا کمی حریص،
+        # آلت‌ها ضعیف‌تر از BTC، نوسان متوسط. هدف: ورود انتخابی‌تر، کاهش اورتریدینگ،
+        # کنترل ریسک روی آلت‌های پرنوسان، تناسب SL/TP با بازار رنج.
         default_params = {
-            "rsi_buy_min": 42,
-            "rsi_buy_max_range_start": 48,
-            "rsi_buy_max_range_end": 65,
+            "rsi_buy_min": 45,                    # کمی بالاتر → ورود دیرتر و باکیفیت‌تر در رنج
+            "rsi_buy_max_range_start": 50,        # زون خرید محدودتر
+            "rsi_buy_max_range_end": 62,          # سقف پایین‌تر تا از خرید در اشباع جلوگیری شود
             "rsi_sell_max": 58,
             "rsi_sell_min_range_start": 35,
             "rsi_sell_min_range_end": 52,
-            "volume_mult": 1.0,
-            "atr_min_filter": 0.0015,
-            "cooldown_minutes": 90,
-            "sl_atr_mult": 1.5,
-            "tp1_mult": 1.5,
-            "tp2_mult": 2.5,
-            "tp3_mult": 4.0,
-            "trailing_mult": 1.0,
-            "stress_pctl_threshold": 88,
-            "stress_size_mult": 0.6
+            "volume_mult": 1.15,                  # نیاز به حجم قوی‌تر برای تایید
+            "atr_min_filter": 0.0016,             # فیلتر نویز کمی سخت‌گیرانه‌تر
+            "cooldown_minutes": 110,              # کول‌داون طولانی‌تر برای بازار رنج
+            "sl_atr_mult": 1.55,                  # کمی عریض‌تر برای حفاظت در ویپساو
+            "tp1_mult": 1.4,                      # TP1 نزدیک‌تر (مناسب رنج)
+            "tp2_mult": 2.3,
+            "tp3_mult": 3.6,                      # TP3 واقع‌بینانه‌تر (نه chase روند بزرگ)
+            "trailing_mult": 1.05,
+            "stress_pctl_threshold": 85,          # آستانه استرس پایین‌تر → کاهش حجم زودتر
+            "stress_size_mult": 0.55
         }
 
         SYMBOL_PARAM_OVERRIDES = {
-            "BTC/USDT":  {"atr_min_filter": 0.0010, "sl_atr_mult": 1.3},
-            "ETH/USDT":  {"atr_min_filter": 0.0012, "sl_atr_mult": 1.4},
-            "BNB/USDT":  {"atr_min_filter": 0.0012, "sl_atr_mult": 1.4},
-            "LTC/USDT":  {"atr_min_filter": 0.0013, "sl_atr_mult": 1.4},
-            "SOL/USDT":  {"atr_min_filter": 0.0018, "sl_atr_mult": 1.7, "rsi_buy_max_range_end": 68},
-            "AVAX/USDT": {"atr_min_filter": 0.0018, "sl_atr_mult": 1.7},
-            "NEAR/USDT": {"atr_min_filter": 0.0018, "sl_atr_mult": 1.7},
-            "ADA/USDT":  {"atr_min_filter": 0.0015},
-            "XRP/USDT":  {"atr_min_filter": 0.0020, "cooldown_minutes": 110},
-            "DOGE/USDT": {"atr_min_filter": 0.0025, "sl_atr_mult": 1.9, "cooldown_minutes": 120},
-            "LINK/USDT": {"atr_min_filter": 0.0016, "sl_atr_mult": 1.6},
-            "PAXG/USDT": {"atr_min_filter": 0.0008, "sl_atr_mult": 1.2, "tp1_mult": 1.3, "rsi_buy_max_range_end": 62},
+            # Majors: فیلتر ملایم‌تر، SL نسبتاً تنگ‌تر (نقدشوندگی بالا)
+            "BTC/USDT":  {"atr_min_filter": 0.0010, "sl_atr_mult": 1.35, "cooldown_minutes": 95,
+                          "rsi_buy_min": 44, "rsi_buy_max_range_end": 64, "volume_mult": 1.05},
+            "ETH/USDT":  {"atr_min_filter": 0.00125, "sl_atr_mult": 1.45, "cooldown_minutes": 105,
+                          "rsi_buy_max_range_end": 63},
+            "BNB/USDT":  {"atr_min_filter": 0.0013, "sl_atr_mult": 1.45, "cooldown_minutes": 105},
+            "LTC/USDT":  {"atr_min_filter": 0.00135, "sl_atr_mult": 1.45, "cooldown_minutes": 105},
+            # L1 alts: نوسان بالاتر → فیلتر سخت‌تر + کول‌داون بیشتر
+            "SOL/USDT":  {"atr_min_filter": 0.0020, "sl_atr_mult": 1.75, "cooldown_minutes": 125,
+                          "rsi_buy_max_range_end": 64, "volume_mult": 1.25, "tp1_mult": 1.45},
+            "AVAX/USDT": {"atr_min_filter": 0.0020, "sl_atr_mult": 1.75, "cooldown_minutes": 125,
+                          "volume_mult": 1.2},
+            "NEAR/USDT": {"atr_min_filter": 0.0020, "sl_atr_mult": 1.75, "cooldown_minutes": 125,
+                          "volume_mult": 1.2},
+            "ADA/USDT":  {"atr_min_filter": 0.0017, "sl_atr_mult": 1.6, "cooldown_minutes": 115,
+                          "volume_mult": 1.15},
+            # Payments / Meme / Oracle
+            "XRP/USDT":  {"atr_min_filter": 0.0021, "sl_atr_mult": 1.65, "cooldown_minutes": 120,
+                          "volume_mult": 1.2},
+            "DOGE/USDT": {"atr_min_filter": 0.0028, "sl_atr_mult": 1.95, "cooldown_minutes": 140,
+                          "volume_mult": 1.3, "tp1_mult": 1.5, "rsi_buy_max_range_end": 60},
+            "LINK/USDT": {"atr_min_filter": 0.0017, "sl_atr_mult": 1.65, "cooldown_minutes": 115,
+                          "volume_mult": 1.15},
+            # Defensive gold: رفتار متفاوت، فیلتر ملایم‌تر و TP محافظه‌کار
+            "PAXG/USDT": {"atr_min_filter": 0.00075, "sl_atr_mult": 1.25, "tp1_mult": 1.25,
+                          "tp2_mult": 2.0, "tp3_mult": 3.0, "rsi_buy_max_range_end": 60,
+                          "cooldown_minutes": 100, "volume_mult": 1.0},
         }
 
         self.symbol_states = {}
@@ -1148,30 +1167,6 @@ class SignalEngine:
             score += 0.75
         return score
 
-    def _score_sell(self, latest, prev, p) -> float:
-        score = 0.0
-        if latest['ema_fast'] < latest['ema_slow']:
-            score += 2.0
-        rsi_cross = latest['rsi'] < p["rsi_sell_max"] and prev['rsi'] >= p["rsi_sell_max"]
-        rsi_zone = p["rsi_sell_min_range_start"] <= latest['rsi'] <= p["rsi_sell_min_range_end"] and latest['rsi'] < prev['rsi']
-        if rsi_cross:
-            score += 2.5
-        elif rsi_zone:
-            score += 1.5
-        if not pd.isna(latest.get('macd_hist', float('nan'))):
-            if latest['macd_hist'] < 0:
-                score += 1.0
-            elif latest['macd_hist'] < prev.get('macd_hist', 0):
-                score += 0.5
-        vol_ratio = latest['volume'] / latest['vol_sma'] if latest['vol_sma'] else 0
-        if vol_ratio >= p["volume_mult"]:
-            score += 1.5
-        elif vol_ratio >= p["volume_mult"] * 0.8:
-            score += 0.75
-        if latest['resistance'] > 0 and (latest['resistance'] - latest['close']) / latest['close'] < 0.02:
-            score += 0.75
-        return score
-
     def get_rule_signal(self, symbol: str, df_15m: pd.DataFrame, df_1h: pd.DataFrame, trend_4h: str,
                          macro_context: Optional[dict] = None, portfolio_adjustments: Optional[dict] = None) -> Tuple[Optional[str], dict]:
         if df_15m.empty or len(df_15m) < 30:
@@ -1217,64 +1212,45 @@ class SignalEngine:
 
         structure = self.analysis.market_structure(df_15m)
 
-        # ---- Long (BUY) + Short (SELL) ----
-        # در حالت DEFENSIVE: فقط روند خالص هم‌جهت مجاز است (BULLISH برای لانگ، BEARISH برای شورت).
+        # ---- فقط پوزیشن Long/BUY (اسپات) ----
+        # در حالت DEFENSIVE پرتفوی (چند ضرر متوالی/expectancy منفی)، حالت NEUTRAL+ساختار
+        # صعودی دیگه مجاز نیست و فقط روند خالص BULLISH در تایم‌فریم 4h سیگنال می‌ده - این
+        # همون جایی‌یه که سیستم به‌خاطر عملکرد ضعیف اخیر، خودش سخت‌گیرتر شده.
         if defensive_mode:
             buy_score = self._score_buy(latest, prev, p) if trend_4h == "BULLISH" else 0.0
-            sell_score = self._score_sell(latest, prev, p) if trend_4h == "BEARISH" else 0.0
+        elif trend_4h == "BULLISH":
+            buy_score = self._score_buy(latest, prev, p)
+        elif trend_4h == "NEUTRAL" and structure == "BULLISH":
+            buy_score = self._score_buy(latest, prev, p) * 0.85
         else:
-            if trend_4h == "BULLISH":
-                buy_score = self._score_buy(latest, prev, p)
-            elif trend_4h == "NEUTRAL" and structure == "BULLISH":
-                buy_score = self._score_buy(latest, prev, p) * 0.85
-            else:
-                buy_score = 0.0
-
-            if trend_4h == "BEARISH":
-                sell_score = self._score_sell(latest, prev, p)
-            elif trend_4h == "NEUTRAL" and structure == "BEARISH":
-                sell_score = self._score_sell(latest, prev, p) * 0.85
-            else:
-                sell_score = 0.0
+            buy_score = 0.0
 
         if trend_4h == "BULLISH":
             buy_score += 1.0
-        if trend_4h == "BEARISH":
-            sell_score += 1.0
 
         if structure == "BULLISH":
             buy_score += 1.5
-        if structure == "BEARISH":
-            sell_score += 1.5
 
         if buy_score > 0 and self.analysis.is_mtf_aligned(df_1h, "BUY"):
             buy_score += 1.5
-        if sell_score > 0 and self.analysis.is_mtf_aligned(df_1h, "SELL"):
-            sell_score += 1.5
 
         if symbol != "BTC/USDT" and btc_trend_4h and btc_structure:
             if btc_trend_4h == "BEARISH" and btc_structure == "BEARISH":
                 buy_score -= 1.0
-                sell_score += 1.0
             elif btc_trend_4h == "BULLISH" and btc_structure == "BULLISH":
                 buy_score += 1.0
-                sell_score -= 1.0
 
         if fng is not None:
             if fng <= 20:
                 buy_score += 0.5
-                sell_score -= 0.5
             elif fng >= 80:
                 buy_score -= 0.5
-                sell_score += 0.5
 
         if funding_rate is not None:
             if funding_rate > 0.0005:
                 buy_score -= 0.5
-                sell_score += 0.5
             elif funding_rate < -0.0005:
                 buy_score += 0.5
-                sell_score -= 0.5
 
         if btc_aligned_now and btc_rsi is not None:
             if btc_trend_4h == "BULLISH":
@@ -1282,17 +1258,10 @@ class SignalEngine:
                     buy_score += 0.3
                 elif btc_rsi > 75:
                     buy_score -= 0.3
-            elif btc_trend_4h == "BEARISH":
-                if 32 <= btc_rsi <= 50:
-                    sell_score += 0.3
-                elif btc_rsi < 25:
-                    sell_score -= 0.3
 
         if btc_aligned_now and btc_macd_hist is not None:
             if btc_trend_4h == "BULLISH" and btc_macd_hist > 0:
                 buy_score += 0.2
-            elif btc_trend_4h == "BEARISH" and btc_macd_hist < 0:
-                sell_score += 0.2
 
         btc_reference_trade = macro_context.get("btc_reference_trade")
         if symbol not in ("BTC/USDT", "PAXG/USDT") and btc_aligned_now and btc_reference_trade:
@@ -1301,30 +1270,13 @@ class SignalEngine:
             if ref_side == "BUY":
                 if ref_health > 0.4:
                     buy_score += 0.5
-                    sell_score -= 0.3
                 elif ref_health < -0.4:
                     buy_score -= 0.5
-            elif ref_side == "SELL":
-                if ref_health > 0.4:
-                    sell_score += 0.5
-                    buy_score -= 0.3
-                elif ref_health < -0.4:
-                    sell_score -= 0.5
 
         # آستانه‌ی پویا: در حالت CAUTION/DEFENSIVE سخت‌گیرتر می‌شه (score_adjustment از
         # PortfolioStateManager می‌آد)، بدون اینکه نیاز باشه کسی دستی این عدد رو عوض کنه.
         threshold = self.config.MIN_SIGNAL_SCORE + score_adjustment
         vol_ratio = latest['volume'] / latest['vol_sma'] if latest['vol_sma'] else 0
-
-        chosen_side = None
-        chosen_score = 0.0
-        if buy_score >= threshold and buy_score >= sell_score:
-            chosen_side = "BUY"
-            chosen_score = buy_score
-        elif sell_score >= threshold and sell_score > buy_score:
-            chosen_side = "SELL"
-            chosen_score = sell_score
-
         diagnostics = {
             "structure": structure,
             "trend_4h": trend_4h,
@@ -1332,7 +1284,7 @@ class SignalEngine:
             "macd_hist": round(float(latest['macd_hist']), 6) if not pd.isna(latest.get('macd_hist', float('nan'))) else None,
             "volume_vs_avg_ratio": round(float(vol_ratio), 2),
             "atr_percentile_100candles": round(pctl, 1),
-            "mtf_1h_aligned": self.analysis.is_mtf_aligned(df_1h, chosen_side) if chosen_side else False,
+            "mtf_1h_aligned": self.analysis.is_mtf_aligned(df_1h, "BUY"),
             "consecutive_losses_this_symbol": self.ai_optimizer.symbol_states[symbol]["consecutive_losses"],
             "fear_greed_index": fng,
             "btc_macro_trend_4h": btc_trend_4h,
@@ -1346,18 +1298,15 @@ class SignalEngine:
             "portfolio_state": portfolio_adjustments.get("state"),
             "portfolio_ai_market_regime": portfolio_adjustments.get("ai_market_regime"),
             "signal_threshold_used": round(threshold, 2),
-            "buy_score": round(buy_score, 2),
-            "sell_score": round(sell_score, 2),
         }
         macro_log = (f"FNG={fng} BTC_trend={btc_trend_4h}/{btc_structure} BTC_RSI={diagnostics['btc_rsi']} "
                      f"BTC_MACD={diagnostics['btc_macd_hist']} funding={funding_rate} "
                      f"spread={diagnostics['spread_pct']} btc_ref={btc_reference_trade} aligned={btc_aligned_now} "
                      f"portfolio_state={diagnostics['portfolio_state']}")
-        if chosen_side:
-            diagnostics["quant_score"] = round(chosen_score, 2)
-            side_label = "خرید" if chosen_side == "BUY" else "فروش"
-            logger.info(f"{symbol}: امتیاز {side_label} {chosen_score:.2f} (آستانه {threshold}) | ساختار: {structure} | {macro_log}")
-            return chosen_side, diagnostics
+        if buy_score >= threshold:
+            diagnostics["quant_score"] = round(buy_score, 2)
+            logger.info(f"{symbol}: امتیاز خرید {buy_score:.2f} (آستانه {threshold}) | ساختار: {structure} | {macro_log}")
+            return "BUY", diagnostics
 
         return None, {}
 
