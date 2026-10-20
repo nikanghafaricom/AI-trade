@@ -566,49 +566,47 @@ class AIParameterOptimizer:
         self._consecutive_connection_failures = 0
         self._connection_alert_sent = False
 
-        # ---- پارامترهای پایه، کالیبره‌شده با جوی بازار (۲۰ اکتبر ۲۰۲۶) ----
-        # جوی بازار: رنج ۸۰K تا ۸۸K روی BTC، نوسان ضمنی (DVOL ~37) در پایین‌ترین سطح از ۲۰۲۱،
-        # نوسان واقعی ~۲۹٪، فاندینگ خنثی، ترس‌وطمع ~۵۵، دامیننس BTC ~۶۰٪ و آلت‌ها ضعیف‌تر
-        # از BTC، + ریسک رویداد: جلسه‌ی Fed در ۲۷–۲۸ اکتبر و نفت بالا.
-        # نتیجه: بازار کم‌نوسان و رنج → ورود نزدیک‌تر به کف رنج (نه تعقیب RSI بالا)،
-        # TPهای نزدیک‌تر، تریلینگ تنگ‌تر، فیلتر ATR/حجم کمی شل‌تر (چون نوسان خودش کمه)،
-        # کول‌داون بلندتر (کاهش معاملات رنج‌زده) و حساسیت زودتر به استرس.
+        # ---- پارامترهای پایه، بازبینی‌شده با داده‌های بازار در ۲۰ اکتبر ۲۰۲۶ ----
+        # BTC حدود 81K و در محدوده‌ی چند هفته‌ی اخیر؛ دامیننس حدود 59.6% و احساسات 55،
+        # همراه با ضعف نسبی آلت‌ها و تقاضای بیشتر برای پوشش ریسک نزولی در بازار آپشن.
+        # این‌ها تنظیمات محافظه‌کارانه‌ی اولیه‌اند، نه ادعای پارامترهای بهینه‌ی اثبات‌شده؛
+        # بهینه‌سازی نهایی باید با بک‌تست خارج از نمونه، کارمزد و اسلیپیج تأیید شود.
         default_params = {
-            "rsi_buy_min": 40,
-            "rsi_buy_max_range_start": 46,
-            "rsi_buy_max_range_end": 62,
-            "rsi_sell_max": 58,
-            "rsi_sell_min_range_start": 35,
-            "rsi_sell_min_range_end": 52,
-            "volume_mult": 0.9,
-            "atr_min_filter": 0.0014,
-            "cooldown_minutes": 100,
-            "sl_atr_mult": 1.5,
-            "tp1_mult": 1.4,
-            "tp2_mult": 2.3,
-            "tp3_mult": 3.5,
-            "trailing_mult": 0.9,
-            "stress_pctl_threshold": 85,
-            "stress_size_mult": 0.55
+            "rsi_buy_min": 38,
+            "rsi_buy_max_range_start": 44,
+            "rsi_buy_max_range_end": 58,
+            "rsi_sell_max": 56,
+            "rsi_sell_min_range_start": 32,
+            "rsi_sell_min_range_end": 49,
+            "volume_mult": 1.0,
+            "atr_min_filter": 0.0012,
+            "cooldown_minutes": 120,
+            "sl_atr_mult": 1.6,
+            "tp1_mult": 1.3,
+            "tp2_mult": 2.1,
+            "tp3_mult": 3.2,
+            "trailing_mult": 0.85,
+            "stress_pctl_threshold": 84,
+            "stress_size_mult": 0.5
         }
 
         SYMBOL_PARAM_OVERRIDES = {
-            # majors: نوسان کم، ویک‌های سریع زیر ۸۰K → استاپ کمی فراتر از ویک
-            "BTC/USDT":  {"atr_min_filter": 0.0009, "sl_atr_mult": 1.4, "cooldown_minutes": 80, "tp1_mult": 1.3, "tp2_mult": 2.2, "tp3_mult": 3.5},
-            "ETH/USDT":  {"atr_min_filter": 0.0012, "sl_atr_mult": 1.5, "cooldown_minutes": 100},
-            "BNB/USDT":  {"atr_min_filter": 0.0011, "sl_atr_mult": 1.4, "cooldown_minutes": 90},
-            "LTC/USDT":  {"atr_min_filter": 0.0013, "sl_atr_mult": 1.5, "cooldown_minutes": 100},
-            # L1 آلت‌ها: ضعف هفتگی ۴ تا ۱۱٪ و دامیننس بالای BTC → تعقیب نکن، کول‌داون بیشتر
-            "SOL/USDT":  {"atr_min_filter": 0.0017, "sl_atr_mult": 1.7, "rsi_buy_max_range_end": 64, "cooldown_minutes": 110},
-            "AVAX/USDT": {"atr_min_filter": 0.0017, "sl_atr_mult": 1.7, "rsi_buy_max_range_end": 62, "cooldown_minutes": 115},
-            "NEAR/USDT": {"atr_min_filter": 0.0018, "sl_atr_mult": 1.8, "rsi_buy_max_range_end": 62, "cooldown_minutes": 120},
-            "ADA/USDT":  {"atr_min_filter": 0.0015, "sl_atr_mult": 1.6, "cooldown_minutes": 110},
-            "XRP/USDT":  {"atr_min_filter": 0.0018, "sl_atr_mult": 1.6, "cooldown_minutes": 115},
-            # میم: نیاز به تایید حجمی بیشتر + استاپ گشادتر + کول‌داون بلند
-            "DOGE/USDT": {"atr_min_filter": 0.0022, "sl_atr_mult": 1.9, "cooldown_minutes": 130, "volume_mult": 1.1, "rsi_buy_max_range_end": 60},
-            "LINK/USDT": {"atr_min_filter": 0.0016, "sl_atr_mult": 1.7, "cooldown_minutes": 115, "rsi_buy_max_range_end": 62},
-            # طلا: رنج کم‌نوسان زیر فشار Fed هاوکیش/دلار قوی → هدف نزدیک، استاپ تنگ
-            "PAXG/USDT": {"atr_min_filter": 0.0008, "sl_atr_mult": 1.2, "tp1_mult": 1.3, "tp2_mult": 2.0, "tp3_mult": 3.0, "rsi_buy_max_range_end": 60, "cooldown_minutes": 100},
+            # نمادهای بزرگ: فیلتر حجم و فاصله‌ی استاپ متعادل؛ از معامله‌ی بیش‌ازحد در رنج پرهیز شود.
+            "BTC/USDT":  {"atr_min_filter": 0.0010, "sl_atr_mult": 1.5, "cooldown_minutes": 100, "tp1_mult": 1.3, "tp2_mult": 2.1, "tp3_mult": 3.1},
+            "ETH/USDT":  {"atr_min_filter": 0.0012, "sl_atr_mult": 1.6, "cooldown_minutes": 120},
+            "BNB/USDT":  {"atr_min_filter": 0.0012, "sl_atr_mult": 1.5, "cooldown_minutes": 115},
+            "LTC/USDT":  {"atr_min_filter": 0.0014, "sl_atr_mult": 1.6, "cooldown_minutes": 125},
+            # آلت‌کوین‌های L1: تأیید بیشتر و کول‌داون طولانی‌تر به‌خاطر ضعف نسبی بازار آلت‌ها.
+            "SOL/USDT":  {"atr_min_filter": 0.0017, "sl_atr_mult": 1.8, "rsi_buy_max_range_end": 58, "cooldown_minutes": 135},
+            "AVAX/USDT": {"atr_min_filter": 0.0018, "sl_atr_mult": 1.8, "rsi_buy_max_range_end": 58, "cooldown_minutes": 140},
+            "NEAR/USDT": {"atr_min_filter": 0.0019, "sl_atr_mult": 1.9, "rsi_buy_max_range_end": 58, "cooldown_minutes": 145},
+            "ADA/USDT":  {"atr_min_filter": 0.0016, "sl_atr_mult": 1.7, "rsi_buy_max_range_end": 58, "cooldown_minutes": 135},
+            "XRP/USDT":  {"atr_min_filter": 0.0017, "sl_atr_mult": 1.7, "rsi_buy_max_range_end": 58, "cooldown_minutes": 135},
+            # DOGE: تأیید حجمی سخت‌تر و زمان انتظار بیشتر برای کاهش ورود به جهش‌های پرنوسان.
+            "DOGE/USDT": {"atr_min_filter": 0.0022, "sl_atr_mult": 2.0, "cooldown_minutes": 160, "volume_mult": 1.15, "rsi_buy_max_range_end": 57},
+            "LINK/USDT": {"atr_min_filter": 0.0016, "sl_atr_mult": 1.8, "cooldown_minutes": 135, "rsi_buy_max_range_end": 58},
+            # PAXG: دارایی با رفتار متفاوت؛ هدف‌ها و فیلتر نوسان مستقل نگه داشته شوند.
+            "PAXG/USDT": {"atr_min_filter": 0.0008, "sl_atr_mult": 1.3, "tp1_mult": 1.3, "tp2_mult": 2.0, "tp3_mult": 3.0, "rsi_buy_max_range_end": 58, "cooldown_minutes": 120},
         }
 
         self.symbol_states = {}
@@ -806,7 +804,7 @@ Never make changes so aggressive that they would effectively stop signals from b
 You are an advanced quantitative trading AI. First, analyze the following key market data and indicators for asset {symbol}:
 {json.dumps(market_metrics)}
 {side_perf_note}
-Current broad market snapshot (2026-10-20): low-volatility range-bound regime. BTC ~81.6K inside an 80K-88K range, 30d implied vol (DVOL) ~37 (lowest since 2021), realized vol ~29, neutral funding, Fear&Greed ~55, BTC dominance ~60% with altcoins weaker than BTC over the past week, Fed meeting on Oct 27-28 (event risk), elevated oil. The bot trades LONG only. Prefer entries near range support over chasing high RSI, nearer take-profits, tight trailing, longer cooldowns for weak alts, and stay inside the moderate adjustments around the given defaults.
+Current broad market snapshot (2026-10-20, based on available market reporting): BTC is around $81K-$82K and remains within its recent multi-week range (roughly $79.8K-$87.4K); BTC dominance is about 59.6%, Fear & Greed is around 55, altcoins have underperformed BTC recently, and options pricing shows notable demand for downside protection. FOMC risk is scheduled for Oct 27-28. Do not assume volatility is uniformly low across all symbols; use each symbol's supplied indicators and recent BUY/SELL performance as primary evidence. The bot trades LONG only. Prefer confirmed entries rather than chasing extended RSI, account for range-bound false breakouts, use ATR-scaled stops/targets, require reasonable volume confirmation, and avoid aggressive parameter changes without sufficient trade samples.
 Based on these specific conditions, dynamically tune the trading parameters to adapt to the current market regime.
 Keep risk management strict to prevent losses, but allow reasonable flexibility so the bot can capture valid opportunities within safe logical boundaries.
 Return ONLY valid JSON with the exact same keys as these default parameters:
