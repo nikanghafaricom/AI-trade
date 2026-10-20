@@ -106,6 +106,11 @@ class Config:
 
     MIN_JUDGE_CONFIDENCE = int(os.getenv("MIN_JUDGE_CONFIDENCE", 55))
 
+    # ---- کلید روشن/خاموش تنظیم خودکار پارامترها توسط AI ----
+    # روی false بذاری، AI دیگه پارامترها رو عوض نمی‌کنه و همون مقدارهای ثابت کد استفاده می‌شن.
+    # (قضاوت AI روی سیگنال‌ها و ارزیابی رژیم بازار مستقل از این کلیده.)
+    AI_PARAM_TUNING_ENABLED = os.getenv("AI_PARAM_TUNING_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
+
     # ---- کارمزد و اسلیپیج (برای مدل‌سازی واقعی‌تر PnL در PaperTrader) ----
     EXCHANGE_TAKER_FEE_PCT = float(os.getenv("EXCHANGE_TAKER_FEE_PCT", 0.0))
     DEFAULT_SPREAD_PCT_FALLBACK = 0.05
@@ -746,6 +751,8 @@ class AIParameterOptimizer:
         return response
 
     def should_optimize(self, symbol: str) -> bool:
+        if not self.config.AI_PARAM_TUNING_ENABLED:
+            return False
         if not self.quota.can_optimize() or not self.budget.can_consume("optimizer"):
             logger.info(f"{symbol}: تنظیم پارامتر دوره‌ای به‌خاطر کمبود سهمیه‌ی Groq این چرخه رد شد "
                         f"(باقیمانده‌ی لحظه‌ای: {self.quota.remaining_requests} درخواست / {self.quota.remaining_tokens} توکن | "
@@ -762,6 +769,8 @@ class AIParameterOptimizer:
         return datetime.now() - state["last_optimized_time"] >= dynamic_interval
 
     def optimize_symbol_parameters(self, symbol: str, df_15m: pd.DataFrame, journal: Optional["TradeJournal"] = None):
+        if not self.config.AI_PARAM_TUNING_ENABLED:
+            return
         if not self.groq_api_key or df_15m.empty:
             return
 
