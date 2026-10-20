@@ -106,12 +106,6 @@ class Config:
 
     MIN_JUDGE_CONFIDENCE = int(os.getenv("MIN_JUDGE_CONFIDENCE", 55))
 
-    # ---- سقف سیگنال روزانه فقط وقتی بازار بد است ----
-    # وقتی رژیم AI محتاط/تدافعی باشد یا حالت پرتفوی CAUTION/DEFENSIVE، حداکثر این تعداد
-    # سیگنال در ۲۴ ساعت مجاز است. در شرایط خوب بازار این محدودیت اعمال نمی‌شود.
-    BAD_MARKET_MAX_SIGNALS_PER_DAY = int(os.getenv("BAD_MARKET_MAX_SIGNALS_PER_DAY", 2))
-    BAD_MARKET_AGGRESSIVENESS_THRESHOLD = float(os.getenv("BAD_MARKET_AGGRESSIVENESS_THRESHOLD", 0.75))
-
     # ---- کارمزد و اسلیپیج (برای مدل‌سازی واقعی‌تر PnL در PaperTrader) ----
     EXCHANGE_TAKER_FEE_PCT = float(os.getenv("EXCHANGE_TAKER_FEE_PCT", 0.0))
     DEFAULT_SPREAD_PCT_FALLBACK = 0.05
@@ -567,57 +561,49 @@ class AIParameterOptimizer:
         self._consecutive_connection_failures = 0
         self._connection_alert_sent = False
 
-        # ---- پارامترهای بهینه‌شده یک‌باره بر اساس رژیم فعلی بازار (۱۹ اکتبر ۲۰۲۶) ----
-        # رژیم: چوپی/رنج، دامیننس BTC بالا (~60%)، Fear&Greed خنثی تا کمی حریص،
-        # آلت‌ها ضعیف‌تر از BTC، نوسان متوسط. هدف: ورود انتخابی‌تر، کاهش اورتریدینگ،
-        # کنترل ریسک روی آلت‌های پرنوسان، تناسب SL/TP با بازار رنج.
+        # ---- پارامترهای پایه، کالیبره‌شده با جوی بازار (۲۰ اکتبر ۲۰۲۶) ----
+        # جوی بازار: رنج ۸۰K تا ۸۸K روی BTC، نوسان ضمنی (DVOL ~37) در پایین‌ترین سطح از ۲۰۲۱،
+        # نوسان واقعی ~۲۹٪، فاندینگ خنثی، ترس‌وطمع ~۵۵، دامیننس BTC ~۶۰٪ و آلت‌ها ضعیف‌تر
+        # از BTC، + ریسک رویداد: جلسه‌ی Fed در ۲۷–۲۸ اکتبر و نفت بالا.
+        # نتیجه: بازار کم‌نوسان و رنج → ورود نزدیک‌تر به کف رنج (نه تعقیب RSI بالا)،
+        # TPهای نزدیک‌تر، تریلینگ تنگ‌تر، فیلتر ATR/حجم کمی شل‌تر (چون نوسان خودش کمه)،
+        # کول‌داون بلندتر (کاهش معاملات رنج‌زده) و حساسیت زودتر به استرس.
         default_params = {
-            "rsi_buy_min": 45,                    # کمی بالاتر → ورود دیرتر و باکیفیت‌تر در رنج
-            "rsi_buy_max_range_start": 50,        # زون خرید محدودتر
-            "rsi_buy_max_range_end": 62,          # سقف پایین‌تر تا از خرید در اشباع جلوگیری شود
+            "rsi_buy_min": 40,
+            "rsi_buy_max_range_start": 46,
+            "rsi_buy_max_range_end": 62,
             "rsi_sell_max": 58,
             "rsi_sell_min_range_start": 35,
             "rsi_sell_min_range_end": 52,
-            "volume_mult": 1.15,                  # نیاز به حجم قوی‌تر برای تایید
-            "atr_min_filter": 0.0016,             # فیلتر نویز کمی سخت‌گیرانه‌تر
-            "cooldown_minutes": 110,              # کول‌داون طولانی‌تر برای بازار رنج
-            "sl_atr_mult": 1.55,                  # کمی عریض‌تر برای حفاظت در ویپساو
-            "tp1_mult": 1.4,                      # TP1 نزدیک‌تر (مناسب رنج)
+            "volume_mult": 0.9,
+            "atr_min_filter": 0.0014,
+            "cooldown_minutes": 100,
+            "sl_atr_mult": 1.5,
+            "tp1_mult": 1.4,
             "tp2_mult": 2.3,
-            "tp3_mult": 3.6,                      # TP3 واقع‌بینانه‌تر (نه chase روند بزرگ)
-            "trailing_mult": 1.05,
-            "stress_pctl_threshold": 85,          # آستانه استرس پایین‌تر → کاهش حجم زودتر
+            "tp3_mult": 3.5,
+            "trailing_mult": 0.9,
+            "stress_pctl_threshold": 85,
             "stress_size_mult": 0.55
         }
 
         SYMBOL_PARAM_OVERRIDES = {
-            # Majors: فیلتر ملایم‌تر، SL نسبتاً تنگ‌تر (نقدشوندگی بالا)
-            "BTC/USDT":  {"atr_min_filter": 0.0010, "sl_atr_mult": 1.35, "cooldown_minutes": 95,
-                          "rsi_buy_min": 44, "rsi_buy_max_range_end": 64, "volume_mult": 1.05},
-            "ETH/USDT":  {"atr_min_filter": 0.00125, "sl_atr_mult": 1.45, "cooldown_minutes": 105,
-                          "rsi_buy_max_range_end": 63},
-            "BNB/USDT":  {"atr_min_filter": 0.0013, "sl_atr_mult": 1.45, "cooldown_minutes": 105},
-            "LTC/USDT":  {"atr_min_filter": 0.00135, "sl_atr_mult": 1.45, "cooldown_minutes": 105},
-            # L1 alts: نوسان بالاتر → فیلتر سخت‌تر + کول‌داون بیشتر
-            "SOL/USDT":  {"atr_min_filter": 0.0020, "sl_atr_mult": 1.75, "cooldown_minutes": 125,
-                          "rsi_buy_max_range_end": 64, "volume_mult": 1.25, "tp1_mult": 1.45},
-            "AVAX/USDT": {"atr_min_filter": 0.0020, "sl_atr_mult": 1.75, "cooldown_minutes": 125,
-                          "volume_mult": 1.2},
-            "NEAR/USDT": {"atr_min_filter": 0.0020, "sl_atr_mult": 1.75, "cooldown_minutes": 125,
-                          "volume_mult": 1.2},
-            "ADA/USDT":  {"atr_min_filter": 0.0017, "sl_atr_mult": 1.6, "cooldown_minutes": 115,
-                          "volume_mult": 1.15},
-            # Payments / Meme / Oracle
-            "XRP/USDT":  {"atr_min_filter": 0.0021, "sl_atr_mult": 1.65, "cooldown_minutes": 120,
-                          "volume_mult": 1.2},
-            "DOGE/USDT": {"atr_min_filter": 0.0028, "sl_atr_mult": 1.95, "cooldown_minutes": 140,
-                          "volume_mult": 1.3, "tp1_mult": 1.5, "rsi_buy_max_range_end": 60},
-            "LINK/USDT": {"atr_min_filter": 0.0017, "sl_atr_mult": 1.65, "cooldown_minutes": 115,
-                          "volume_mult": 1.15},
-            # Defensive gold: رفتار متفاوت، فیلتر ملایم‌تر و TP محافظه‌کار
-            "PAXG/USDT": {"atr_min_filter": 0.00075, "sl_atr_mult": 1.25, "tp1_mult": 1.25,
-                          "tp2_mult": 2.0, "tp3_mult": 3.0, "rsi_buy_max_range_end": 60,
-                          "cooldown_minutes": 100, "volume_mult": 1.0},
+            # majors: نوسان کم، ویک‌های سریع زیر ۸۰K → استاپ کمی فراتر از ویک
+            "BTC/USDT":  {"atr_min_filter": 0.0009, "sl_atr_mult": 1.4, "cooldown_minutes": 80, "tp1_mult": 1.3, "tp2_mult": 2.2, "tp3_mult": 3.5},
+            "ETH/USDT":  {"atr_min_filter": 0.0012, "sl_atr_mult": 1.5, "cooldown_minutes": 100},
+            "BNB/USDT":  {"atr_min_filter": 0.0011, "sl_atr_mult": 1.4, "cooldown_minutes": 90},
+            "LTC/USDT":  {"atr_min_filter": 0.0013, "sl_atr_mult": 1.5, "cooldown_minutes": 100},
+            # L1 آلت‌ها: ضعف هفتگی ۴ تا ۱۱٪ و دامیننس بالای BTC → تعقیب نکن، کول‌داون بیشتر
+            "SOL/USDT":  {"atr_min_filter": 0.0017, "sl_atr_mult": 1.7, "rsi_buy_max_range_end": 64, "cooldown_minutes": 110},
+            "AVAX/USDT": {"atr_min_filter": 0.0017, "sl_atr_mult": 1.7, "rsi_buy_max_range_end": 62, "cooldown_minutes": 115},
+            "NEAR/USDT": {"atr_min_filter": 0.0018, "sl_atr_mult": 1.8, "rsi_buy_max_range_end": 62, "cooldown_minutes": 120},
+            "ADA/USDT":  {"atr_min_filter": 0.0015, "sl_atr_mult": 1.6, "cooldown_minutes": 110},
+            "XRP/USDT":  {"atr_min_filter": 0.0018, "sl_atr_mult": 1.6, "cooldown_minutes": 115},
+            # میم: نیاز به تایید حجمی بیشتر + استاپ گشادتر + کول‌داون بلند
+            "DOGE/USDT": {"atr_min_filter": 0.0022, "sl_atr_mult": 1.9, "cooldown_minutes": 130, "volume_mult": 1.1, "rsi_buy_max_range_end": 60},
+            "LINK/USDT": {"atr_min_filter": 0.0016, "sl_atr_mult": 1.7, "cooldown_minutes": 115, "rsi_buy_max_range_end": 62},
+            # طلا: رنج کم‌نوسان زیر فشار Fed هاوکیش/دلار قوی → هدف نزدیک، استاپ تنگ
+            "PAXG/USDT": {"atr_min_filter": 0.0008, "sl_atr_mult": 1.2, "tp1_mult": 1.3, "tp2_mult": 2.0, "tp3_mult": 3.0, "rsi_buy_max_range_end": 60, "cooldown_minutes": 100},
         }
 
         self.symbol_states = {}
@@ -670,26 +656,26 @@ class AIParameterOptimizer:
 
     def validate_and_clamp_params(self, new_params: dict) -> dict:
         clamped = {}
-        clamped["rsi_buy_min"] = max(30, min(float(new_params.get("rsi_buy_min", 42)), 50))
-        clamped["rsi_buy_max_range_start"] = max(40, min(float(new_params.get("rsi_buy_max_range_start", 48)), 55))
-        clamped["rsi_buy_max_range_end"] = max(55, min(float(new_params.get("rsi_buy_max_range_end", 65)), 75))
+        clamped["rsi_buy_min"] = max(34, min(float(new_params.get("rsi_buy_min", 40)), 48))
+        clamped["rsi_buy_max_range_start"] = max(42, min(float(new_params.get("rsi_buy_max_range_start", 46)), 52))
+        clamped["rsi_buy_max_range_end"] = max(56, min(float(new_params.get("rsi_buy_max_range_end", 62)), 70))
 
         clamped["rsi_sell_max"] = max(50, min(float(new_params.get("rsi_sell_max", 58)), 70))
         clamped["rsi_sell_min_range_start"] = max(25, min(float(new_params.get("rsi_sell_min_range_start", 35)), 45))
         clamped["rsi_sell_min_range_end"] = max(40, min(float(new_params.get("rsi_sell_min_range_end", 52)), 60))
 
-        clamped["volume_mult"] = max(0.7, min(float(new_params.get("volume_mult", 1.0)), 1.6))
-        clamped["atr_min_filter"] = max(0.0008, min(float(new_params.get("atr_min_filter", 0.0015)), 0.004))
-        clamped["cooldown_minutes"] = max(45, min(int(new_params.get("cooldown_minutes", 90)), 240))
+        clamped["volume_mult"] = max(0.75, min(float(new_params.get("volume_mult", 0.9)), 1.4))
+        clamped["atr_min_filter"] = max(0.0008, min(float(new_params.get("atr_min_filter", 0.0014)), 0.0035))
+        clamped["cooldown_minutes"] = max(60, min(int(new_params.get("cooldown_minutes", 100)), 200))
 
-        clamped["sl_atr_mult"] = max(1.2, min(float(new_params.get("sl_atr_mult", 1.5)), 2.5))
-        clamped["tp1_mult"] = max(1.2, min(float(new_params.get("tp1_mult", 1.5)), 3.0))
-        clamped["tp2_mult"] = max(2.0, min(float(new_params.get("tp2_mult", 2.5)), 5.0))
-        clamped["tp3_mult"] = max(3.0, min(float(new_params.get("tp3_mult", 4.0)), 8.0))
-        clamped["trailing_mult"] = max(0.8, min(float(new_params.get("trailing_mult", 1.0)), 2.0))
+        clamped["sl_atr_mult"] = max(1.2, min(float(new_params.get("sl_atr_mult", 1.5)), 2.3))
+        clamped["tp1_mult"] = max(1.2, min(float(new_params.get("tp1_mult", 1.4)), 2.2))
+        clamped["tp2_mult"] = max(2.0, min(float(new_params.get("tp2_mult", 2.3)), 3.5))
+        clamped["tp3_mult"] = max(3.0, min(float(new_params.get("tp3_mult", 3.5)), 5.5))
+        clamped["trailing_mult"] = max(0.8, min(float(new_params.get("trailing_mult", 0.9)), 1.6))
 
-        clamped["stress_pctl_threshold"] = max(80, min(float(new_params.get("stress_pctl_threshold", 88)), 95))
-        clamped["stress_size_mult"] = max(0.4, min(float(new_params.get("stress_size_mult", 0.6)), 0.85))
+        clamped["stress_pctl_threshold"] = max(82, min(float(new_params.get("stress_pctl_threshold", 85)), 93))
+        clamped["stress_size_mult"] = max(0.4, min(float(new_params.get("stress_size_mult", 0.55)), 0.8))
         return clamped
 
     def _wait_for_groq_slot(self):
@@ -811,6 +797,7 @@ Never make changes so aggressive that they would effectively stop signals from b
 You are an advanced quantitative trading AI. First, analyze the following key market data and indicators for asset {symbol}:
 {json.dumps(market_metrics)}
 {side_perf_note}
+Current broad market snapshot (2026-10-20): low-volatility range-bound regime. BTC ~81.6K inside an 80K-88K range, 30d implied vol (DVOL) ~37 (lowest since 2021), realized vol ~29, neutral funding, Fear&Greed ~55, BTC dominance ~60% with altcoins weaker than BTC over the past week, Fed meeting on Oct 27-28 (event risk), elevated oil. The bot trades LONG only. Prefer entries near range support over chasing high RSI, nearer take-profits, tight trailing, longer cooldowns for weak alts, and stay inside the moderate adjustments around the given defaults.
 Based on these specific conditions, dynamically tune the trading parameters to adapt to the current market regime.
 Keep risk management strict to prevent losses, but allow reasonable flexibility so the bot can capture valid opportunities within safe logical boundaries.
 Return ONLY valid JSON with the exact same keys as these default parameters:
@@ -1878,42 +1865,12 @@ class HybridTradingSystem:
         self.last_summary_date: Optional[str] = date_cls.today().isoformat()
         self.consecutive_full_cycle_failures = 0
         self.data_outage_alert_sent = False
-        # شمارنده سیگنال روزانه (فقط وقتی بازار بد است سقف اعمال می‌شود)
-        self._signals_today_date: Optional[str] = date_cls.today().isoformat()
-        self._signals_today_count: int = 0
 
     def _send_crash_alert(self, text: str):
         try:
             self.telegram.send_error_alert(text)
         except Exception:
             logger.error("حتی ارسال هشدار خطا هم ناموفق بود.")
-
-    def _roll_daily_signal_counter(self):
-        today = date_cls.today().isoformat()
-        if self._signals_today_date != today:
-            self._signals_today_date = today
-            self._signals_today_count = 0
-
-    def _is_bad_market(self, portfolio_adjustments: dict) -> bool:
-        """بازار بد = حالت پرتفوی محتاط/تدافعی یا ضریب تهاجمی‌بودن AI پایین."""
-        state = portfolio_adjustments.get("state", "NORMAL")
-        if state in ("CAUTION", "DEFENSIVE"):
-            return True
-        ai_mult = (self.portfolio_state.ai_regime or {}).get("aggressiveness_mult", 1.0)
-        if ai_mult < self.config.BAD_MARKET_AGGRESSIVENESS_THRESHOLD:
-            return True
-        return False
-
-    def _can_send_more_signals_today(self, portfolio_adjustments: dict) -> Tuple[bool, str]:
-        """در بازار بد حداکثر BAD_MARKET_MAX_SIGNALS_PER_DAY سیگنال در روز؛ در بازار خوب بدون سقف سخت."""
-        self._roll_daily_signal_counter()
-        if not self._is_bad_market(portfolio_adjustments):
-            return True, ""
-        limit = self.config.BAD_MARKET_MAX_SIGNALS_PER_DAY
-        if self._signals_today_count >= limit:
-            return False, (f"سقف سیگنال روزانه در بازار بد پر شده "
-                           f"({self._signals_today_count}/{limit}) - تا فردا صبر می‌کنیم")
-        return True, ""
 
     def _start_trade_monitor_thread(self):
         def monitor_loop():
@@ -2024,12 +1981,6 @@ class HybridTradingSystem:
                 logger.info(f"{symbol}: سیگنال {rule_signal} توسط لایه‌ی قضاوت AI رد شد (اطمینان {judge['confidence']}%، حداقل لازم {required_confidence}%) - {judge['reason']}")
                 return True
 
-            # سقف سیگنال روزانه فقط وقتی بازار بد است (محتاط/تدافعی یا AI تهاجمی پایین)
-            can_more, quota_reason = self._can_send_more_signals_today(portfolio_adjustments)
-            if not can_more:
-                logger.info(f"{symbol}: سیگنال {rule_signal} رد شد - {quota_reason}")
-                return True
-
             latest = df_15m.iloc[-1]
             trade_data = self.telegram.send_signal(
                 symbol, rule_signal, latest, trend_4h, self.config.ENTRY_TIMEFRAME,
@@ -2053,11 +2004,6 @@ class HybridTradingSystem:
                     spread_pct_at_entry=symbol_macro_context.get("spread_pct")
                 )
                 self.last_signal_time[symbol] = now
-                self._roll_daily_signal_counter()
-                self._signals_today_count += 1
-                if self._is_bad_market(portfolio_adjustments):
-                    logger.info(f"سیگنال روزانه در بازار بد: {self._signals_today_count}/"
-                                f"{self.config.BAD_MARKET_MAX_SIGNALS_PER_DAY}")
 
             return True
 
@@ -2141,7 +2087,6 @@ class HybridTradingSystem:
 • لایه‌ی سراسری پرتفوی (محاسباتی، بدون هزینه‌ی AI): بر اساس {self.config.PORTFOLIO_ROLLING_WINDOW} رخداد اخیر و {self.config.PORTFOLIO_CONSECUTIVE_LOSS_THRESHOLD} ضرر متوالی سراسری، خودکار بین حالت‌های 🟢عادی/🟡محتاط/🔴تدافعی جابه‌جا می‌شه
 • در حالت تدافعی: آستانه‌ی ورود و حداقل اطمینان AI بالاتر می‌ره، حجم پوزیشن کم می‌شه، کول‌داون بیشتر می‌شه و فقط روند خالص صعودی مجازه
 • ارزیابی سراسری و کم‌تکرار AI از رژیم کلی بازار (هر {self.config.MARKET_REGIME_AI_INTERVAL_HOURS} ساعت، مصرف Groq ناچیز) که یک ضریب حجم اضافه اعمال می‌کنه
-• **سقف سیگنال روزانه فقط در بازار بد:** وقتی رژیم محتاط/تدافعی یا ضریب تهاجمی‌بودن AI زیر {self.config.BAD_MARKET_AGGRESSIVENESS_THRESHOLD:g} باشد، حداکثر {self.config.BAD_MARKET_MAX_SIGNALS_PER_DAY} سیگنال در ۲۴ ساعت. در شرایط خوب بازار این سقف برداشته می‌شود
 • هر تغییر حالت پرتفوی با یک پیام توضیحی به تلگرام اطلاع داده می‌شه - نیازی به پیگیری دستی نیست
 
 🆕 **جدید - بودجه‌بند هوشمند سهمیه‌ی رایگان Groq:**
