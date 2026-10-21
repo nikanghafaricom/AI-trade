@@ -14,7 +14,7 @@ import gc
 import json
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from datetime import datetime, timedelta, date as date_cls
+from datetime import datetime, timedelta, timezone, date as date_cls
 from typing import Dict, Optional, List, Tuple
 import pandas as pd
 import ccxt
@@ -110,6 +110,20 @@ class Config:
     # روی false بذاری، AI دیگه پارامترها رو عوض نمی‌کنه و همون مقدارهای ثابت کد استفاده می‌شن.
     # (قضاوت AI روی سیگنال‌ها و ارزیابی رژیم بازار مستقل از این کلیده.)
     AI_PARAM_TUNING_ENABLED = os.getenv("AI_PARAM_TUNING_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
+
+    # ---- زمان‌بندی تنظیم روزانه‌ی پارامترها توسط AI (به وقت UTC) ----
+    # پیش‌فرض ۰۰:۳۰ UTC (= ۰۴:۰۰ بامداد تهران). دلیل انتخاب این ساعت:
+    #  ۱) درست بعد از بسته‌شدن کندل روزانه‌ی UTC، پس اندیکاتورهای روزانه/۴ساعته تازه‌ان
+    #  ۲) بودجه‌ی روزانه‌ی Groq هم نیمه‌شب UTC صفر می‌شه، پس تنظیم‌کننده از سهمیه‌ی کامل روز استفاده می‌کنه
+    #     و به سهمیه‌ی قضاوت معامله‌ها (اولویت اول) دست نمی‌زنه
+    #  ۳) دور از ساعت‌های پرنوسان داده‌های آمریکا و جلسات Fed (حدود ۱۲:۳۰ تا ۱۸:۰۰ UTC)
+    # مصرف: ۱ درخواست برای هر نماد در روز (حدود ۲۰ تا ۲۵ هزار توکن برای ۱۲ نماد ≈ ۱۲٪ سقف ۲۰۰هزارتایی)
+    AI_TUNE_HOUR_UTC = int(os.getenv("AI_TUNE_HOUR_UTC", 0))
+    AI_TUNE_MINUTE_UTC = int(os.getenv("AI_TUNE_MINUTE_UTC", 30))
+    # حداکثر تلاش برای هر نماد در هر زمان‌بندی (اگه Groq خطا/۴۲۹ داد، بیشتر از این اصرار نمی‌کنه)
+    AI_TUNE_MAX_ATTEMPTS_PER_SLOT = int(os.getenv("AI_TUNE_MAX_ATTEMPTS_PER_SLOT", 3))
+    # یادداشت اختیاری برای AI (مثلاً رویداد مهم پیش‌رو). خالی = استفاده نمی‌شه.
+    AI_TUNE_MARKET_NOTE = os.getenv("AI_TUNE_MARKET_NOTE", "").strip()
 
     # ---- کارمزد و اسلیپیج (برای مدل‌سازی واقعی‌تر PnL در PaperTrader) ----
     EXCHANGE_TAKER_FEE_PCT = float(os.getenv("EXCHANGE_TAKER_FEE_PCT", 0.0))
@@ -614,12 +628,46 @@ class AIParameterOptimizer:
         self.symbol_states = {}
         for sym in config.SYMBOLS:
             merged_params = {**default_params, **SYMBOL_PARAM_OVERRIDES.get(sym, {})}
+            validated = self.validate_and_clamp_params(merged_params)
             self.symbol_states[sym] = {
                 "last_optimized_time": None,
+                "last_tuned_utc": None,
+                "tune_slot": None,
+                "tune_attempts": 0,
+                "quota_skip_logged_slot": None,
                 "consecutive_losses": 0,
-                "params": self.validate_and_clamp_params(merged_params)
+                # baseline ثابت: لنگر تنظیم روزانه. AI هر روز از همین نقطه شروع می‌کنه تا از روز به روز دور نشه (drift نکنه)
+                "baseline_params": dict(validated),
+                "params": dict(validated)
             }
         self.optimization_interval = timedelta(hours=2)
+        self._start_utc = datetime.now(timezone.utc)
+
+    # دسته‌بندی دارایی‌ها برای اصل «تنظیم بر اساس نوع دارایی» در پرامپت تنظیم‌کننده
+    SYMBOL_ASSET_CLASS = {
+        "BTC/USDT": "major", "ETH/USDT": "major", "BNB/USDT": "major", "LTC/USDT": "major",
+        "SOL/USDT": "alt", "AVAX/USDT": "alt", "NEAR/USDT": "alt", "ADA/USDT": "alt",
+        "XRP/USDT": "alt", "LINK/USDT": "alt",
+        "DOGE/USDT": "meme",
+        "PAXG/USDT": "gold",
+    }
+
+    TUNING_SYSTEM_PROMPT = """You are the parameter-tuning engine of a LONG-ONLY spot crypto signal bot (15m entries, 1h confirmation, 4h trend filter). You tune ONE symbol per call. Apply the expert methodology below exactly; do not invent your own style.
+
+METHOD
+1. ANCHOR: "baseline_params" are expert-calibrated starting values for this symbol. Start from them. Move a value away from baseline only when the live data clearly justifies it, and keep moves moderate: about +/-20% of the baseline value, RSI keys within +/-4 points (atr_min_filter and cooldown_minutes may move up to +/-35%). Never jump to extreme values.
+2. READ THE REGIME from live data (btc_trend_4h, btc_structure, btc_volatility_percentile, the symbol's atr_ratio_15m, ai_market_regime, fear_greed, market_note) and apply the matching profile:
+ - LOW-VOLATILITY RANGE / CHOP (low volatility percentile, neutral or mixed structure): enter near range support and do not chase high RSI (rsi_buy_max_range_end about 60-62); nearer targets (tp1 1.3-1.4, tp2 2.1-2.3, tp3 3.2-3.5); tight trailing (0.8-0.9); slightly relaxed volume_mult (0.85-0.95); atr_min_filter about 0.70-0.80 x atr_ratio_15m so the filter does not choke valid signals in quiet markets; longer cooldown (90-120).
+ - TRENDING BULLISH: wider targets (tp1 1.6-1.8, tp2 2.6-3.0, tp3 4.0-4.5); looser trailing (1.1-1.3); higher RSI cap (66-70); volume_mult about 1.0-1.1; shorter cooldown (70-90).
+ - TRENDING BEARISH / WEAK: defensive: lower rsi_buy_min and RSI cap, cooldown 110-140, lower stress_size_mult. A low signal count is acceptable here: do NOT loosen filters just to force signals.
+ - HIGH VOLATILITY / EVENT RISK: wider stop (sl_atr_mult 1.8-2.2), stress_pctl_threshold 82-85, stress_size_mult 0.45-0.55, longer cooldown.
+3. ASSET CLASS (given as asset_class): major -> stop about 1.4-1.5 ATR, moderate filters; alt -> stop 1.6-1.8, lower RSI cap and longer cooldown when it is weak versus BTC; meme -> stop about 1.9, volume_mult >= 1.1, long cooldown; gold -> low-volatility asset: stop about 1.2, nearer targets.
+4. RISK FIRST: the stop must sit beyond typical wick noise for the asset class. Always tp1 < tp2 < tp3 and rsi_buy_max_range_start < rsi_buy_max_range_end.
+5. PERFORMANCE FEEDBACK: consecutive_losses >= 2 or poor recent BUY performance (low win_rate, negative avg_r) -> longer cooldown, lower RSI cap, lower stress_size_mult. Good recent BUY performance -> you may relax slightly, never beyond the +/- limits in rule 1. Ignore stats that are null or have a tiny count.
+6. The bot is LONG-ONLY: keep every rsi_sell_* key exactly equal to its baseline value.
+7. Never make settings so tight that signals stop entirely, and never so loose that signal quality collapses.
+
+OUTPUT: only a JSON object with exactly the same keys as baseline_params and numeric values. No markdown, no extra text."""
 
     def is_blacklisted(self, symbol: str, current_pctl: Optional[float] = None) -> bool:
         if symbol not in self.blacklist:
@@ -750,25 +798,45 @@ class AIParameterOptimizer:
 
         return response
 
+    def _latest_tune_slot_utc(self, now_utc: datetime) -> datetime:
+        """آخرین زمان‌بندی تنظیم روزانه (UTC) که از اون گذشتیم."""
+        hour = max(0, min(23, int(self.config.AI_TUNE_HOUR_UTC)))
+        minute = max(0, min(59, int(self.config.AI_TUNE_MINUTE_UTC)))
+        slot = now_utc.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if slot > now_utc:
+            slot -= timedelta(days=1)
+        return slot
+
     def should_optimize(self, symbol: str) -> bool:
         if not self.config.AI_PARAM_TUNING_ENABLED:
             return False
-        if not self.quota.can_optimize() or not self.budget.can_consume("optimizer"):
-            logger.info(f"{symbol}: تنظیم پارامتر دوره‌ای به‌خاطر کمبود سهمیه‌ی Groq این چرخه رد شد "
-                        f"(باقیمانده‌ی لحظه‌ای: {self.quota.remaining_requests} درخواست / {self.quota.remaining_tokens} توکن | "
-                        f"بودجه‌ی روزانه: {self.budget.get_status_summary()}) - "
-                        f"سهمیه برای لایه‌ی قضاوت معامله (اولویت اول) نگه داشته می‌شه.")
-            return False
-        state = self.symbol_states[symbol]
-        if state["last_optimized_time"] is None:
-            return True
-        # فاصله‌ی بین بهینه‌سازی‌ها ثابت نیست: بر اساس سرعت واقعی مصرف بودجه‌ی روزانه
-        # پویا تنظیم می‌شه تا هم بیشترین بهره از سهمیه گرفته بشه، هم هیچ‌وقت زودتر از
-        # موعد ته نکشه.
-        dynamic_interval = self.budget.get_dynamic_optimizer_interval()
-        return datetime.now() - state["last_optimized_time"] >= dynamic_interval
 
-    def optimize_symbol_parameters(self, symbol: str, df_15m: pd.DataFrame, journal: Optional["TradeJournal"] = None):
+        # تنظیم فقط یک‌بار در روز و در ساعت مقرر (AI_TUNE_HOUR_UTC / AI_TUNE_MINUTE_UTC)
+        now_utc = datetime.now(timezone.utc)
+        slot = self._latest_tune_slot_utc(now_utc)
+        state = self.symbol_states[symbol]
+
+        # اگه بعد از آخرین زمان‌بندی قبلاً تنظیم شده، یا ربات بعد از اون زمان‌بندی ری‌استارت شده
+        # (پارامترهای پایه‌ی کد معتبرن و نباید با هر ری‌استارت سهمیه خرج بشه)، تا زمان‌بندی بعدی صبر کن.
+        reference = state.get("last_tuned_utc") or self._start_utc
+        if reference >= slot:
+            return False
+
+        if state.get("tune_slot") == slot and state.get("tune_attempts", 0) >= self.config.AI_TUNE_MAX_ATTEMPTS_PER_SLOT:
+            return False
+
+        if not self.quota.can_optimize() or not self.budget.can_consume("optimizer"):
+            if state.get("quota_skip_logged_slot") != slot:
+                state["quota_skip_logged_slot"] = slot
+                logger.info(f"{symbol}: تنظیم روزانه‌ی پارامتر به‌خاطر کمبود سهمیه‌ی Groq فعلاً رد شد "
+                            f"(باقیمانده‌ی لحظه‌ای: {self.quota.remaining_requests} درخواست / {self.quota.remaining_tokens} توکن | "
+                            f"بودجه‌ی روزانه: {self.budget.get_status_summary()}) - "
+                            f"سهمیه برای لایه‌ی قضاوت معامله (اولویت اول) نگه داشته می‌شه و چرخه‌ی بعد دوباره تلاش می‌شه.")
+            return False
+        return True
+
+    def optimize_symbol_parameters(self, symbol: str, df_15m: pd.DataFrame, journal: Optional["TradeJournal"] = None,
+                                   macro_context: Optional[dict] = None, ai_regime: Optional[dict] = None):
         if not self.config.AI_PARAM_TUNING_ENABLED:
             return
         if not self.groq_api_key or df_15m.empty:
@@ -777,42 +845,56 @@ class AIParameterOptimizer:
         state = self.symbol_states[symbol]
         latest = df_15m.iloc[-1]
 
+        now_utc = datetime.now(timezone.utc)
+        slot = self._latest_tune_slot_utc(now_utc)
+        if state.get("tune_slot") != slot:
+            state["tune_slot"] = slot
+            state["tune_attempts"] = 0
+        state["tune_attempts"] += 1
+
+        def _f(key, default=0.0):
+            v = latest.get(key)
+            return float(v) if v is not None and not pd.isna(v) else default
+
+        close = _f('close')
+        atr = _f('atr')
+        vol = _f('volume')
+        vol_sma = _f('vol_sma')
+        support = _f('support')
+        resistance = _f('resistance')
+        macro_context = macro_context or {}
+
         market_metrics = {
             "symbol": symbol,
-            "close_price": float(latest['close']),
-            "rsi": float(latest['rsi']) if not pd.isna(latest['rsi']) else 50,
-            "atr_volatility": float(latest['atr']) if not pd.isna(latest['atr']) else 0,
-            "current_volume": float(latest['volume']) if not pd.isna(latest['volume']) else 0,
-            "volume_sma": float(latest['vol_sma']) if not pd.isna(latest['vol_sma']) else 0,
-            "support": float(latest['support']) if not pd.isna(latest['support']) else 0,
-            "resistance": float(latest['resistance']) if not pd.isna(latest['resistance']) else 0,
-            "consecutive_losses": state["consecutive_losses"]
+            "asset_class": self.SYMBOL_ASSET_CLASS.get(symbol, "alt"),
+            "close_price": close,
+            "rsi_15m": _f('rsi', 50),
+            "atr_ratio_15m": round(atr / close, 5) if close else 0,
+            "volume_ratio": round(vol / vol_sma, 2) if vol_sma else None,
+            "dist_to_support_pct": round((close - support) / close * 100, 2) if close and support else None,
+            "dist_to_resistance_pct": round((resistance - close) / close * 100, 2) if close and resistance else None,
+            "consecutive_losses": state["consecutive_losses"],
+            "btc_trend_4h": macro_context.get("btc_trend_4h"),
+            "btc_structure": macro_context.get("btc_structure"),
+            "btc_rsi": macro_context.get("btc_rsi"),
+            "btc_volatility_percentile": macro_context.get("btc_volatility_pctl"),
+            "fear_greed": macro_context.get("fear_greed"),
+            "ai_market_regime": ai_regime.get("market_regime") if ai_regime else None,
+            "ai_regime_aggressiveness": ai_regime.get("aggressiveness_mult") if ai_regime else None,
         }
+        if self.config.AI_TUNE_MARKET_NOTE:
+            market_metrics["market_note"] = self.config.AI_TUNE_MARKET_NOTE
 
-        side_perf_note = ""
         if journal is not None:
-            buy_perf = journal.get_side_performance(symbol, "BUY")
-            sell_perf = journal.get_side_performance(symbol, "SELL")
-            market_metrics["recent_buy_performance"] = buy_perf
-            market_metrics["recent_sell_performance"] = sell_perf
-            side_perf_note = """
-IMPORTANT - side-specific tuning guidance:
-"recent_buy_performance" and "recent_sell_performance" show this symbol's last trades broken down by side (win_rate, avg_r, count; null/0 means not enough data yet - ignore in that case).
-If BUY has recently underperformed while SELL has not (or vice versa), prefer adjusting the side-specific keys (rsi_buy_min, rsi_buy_max_range_start, rsi_buy_max_range_end for BUY; rsi_sell_max, rsi_sell_min_range_start, rsi_sell_min_range_end for SELL) rather than the shared risk keys (sl_atr_mult, tp1_mult, tp2_mult, tp3_mult, atr_min_filter, volume_mult, cooldown_minutes, trailing_mult), since those shared keys affect both sides and unnecessarily reducing them would also cut down the healthy side's signal frequency.
-Never make changes so aggressive that they would effectively stop signals from being generated at all - stay within reasonable, moderate adjustments.
-"""
+            market_metrics["recent_buy_performance"] = journal.get_side_performance(symbol, "BUY")
+            market_metrics["recent_sell_performance"] = journal.get_side_performance(symbol, "SELL")
 
-        prompt = f"""
-You are an advanced quantitative trading AI. First, analyze the following key market data and indicators for asset {symbol}:
-{json.dumps(market_metrics)}
-{side_perf_note}
-Current broad market snapshot (2026-10-20): low-volatility range-bound regime. BTC ~81.6K inside an 80K-88K range, 30d implied vol (DVOL) ~37 (lowest since 2021), realized vol ~29, neutral funding, Fear&Greed ~55, BTC dominance ~60% with altcoins weaker than BTC over the past week, Fed meeting on Oct 27-28 (event risk), elevated oil. The bot trades LONG only. Prefer entries near range support over chasing high RSI, nearer take-profits, tight trailing, longer cooldowns for weak alts, and stay inside the moderate adjustments around the given defaults.
-Based on these specific conditions, dynamically tune the trading parameters to adapt to the current market regime.
-Keep risk management strict to prevent losses, but allow reasonable flexibility so the bot can capture valid opportunities within safe logical boundaries.
-Return ONLY valid JSON with the exact same keys as these default parameters:
-{json.dumps(state["params"])}
-No markdown formatting, no extra text.
-"""
+        market_metrics["baseline_params"] = state["baseline_params"]
+
+        user_prompt = (
+            "Tune today's parameters for this symbol using the method in your instructions.\n"
+            + json.dumps(market_metrics, default=str)
+        )
 
         headers = {
             "Authorization": f"Bearer {self.groq_api_key}",
@@ -821,17 +903,20 @@ No markdown formatting, no extra text.
 
         payload = {
             "model": "openai/gpt-oss-120b",
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": [
+                {"role": "system", "content": self.TUNING_SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt}
+            ],
             "temperature": 0.2,
             "reasoning_effort": "low",
-            "max_tokens": 600
+            "max_tokens": 800
         }
 
         try:
             response = self._post_with_retry(f"{self.groq_endpoint}v1/chat/completions", payload, headers, timeout=25, label=symbol)
             if response.status_code == 200:
                 res_data = response.json()
-                self.budget.record_usage("optimizer", res_data, fallback_tokens=700)
+                self.budget.record_usage("optimizer", res_data, fallback_tokens=1800)
                 content = res_data['choices'][0]['message']['content'].strip()
 
                 if content.startswith("```"):
@@ -841,9 +926,23 @@ No markdown formatting, no extra text.
                     raise ValueError("Groq یه پاسخ خالی برگردوند (احتمالاً توکن‌های reasoning تمام سقف max_tokens رو مصرف کردن)")
 
                 raw_params = json.loads(content)
-                state["params"] = self.validate_and_clamp_params(raw_params)
+                # کلیدهای ناقص/حذف‌شده با baseline پر می‌شن؛ فروش (long-only) همیشه روی baseline می‌مونه
+                merged = {**state["baseline_params"], **{k: v for k, v in raw_params.items() if k in state["baseline_params"]}}
+                for k in ("rsi_sell_max", "rsi_sell_min_range_start", "rsi_sell_min_range_end"):
+                    merged[k] = state["baseline_params"][k]
+                clamped = self.validate_and_clamp_params(merged)
+                # ترتیب منطقی هدف‌ها و بازه‌ی RSI
+                if not (clamped["tp1_mult"] < clamped["tp2_mult"] < clamped["tp3_mult"]):
+                    clamped["tp1_mult"] = state["baseline_params"]["tp1_mult"]
+                    clamped["tp2_mult"] = state["baseline_params"]["tp2_mult"]
+                    clamped["tp3_mult"] = state["baseline_params"]["tp3_mult"]
+                if clamped["rsi_buy_max_range_start"] >= clamped["rsi_buy_max_range_end"]:
+                    clamped["rsi_buy_max_range_start"] = state["baseline_params"]["rsi_buy_max_range_start"]
+                    clamped["rsi_buy_max_range_end"] = state["baseline_params"]["rsi_buy_max_range_end"]
+                state["params"] = clamped
                 state["last_optimized_time"] = datetime.now()
-                logger.info(f"پارامترهای ضد ضرر و پویای {symbol} بر اساس داده‌های روز بروزرسانی شد.")
+                state["last_tuned_utc"] = now_utc
+                logger.info(f"پارامترهای {symbol} بر اساس تنظیم روزانه‌ی AI بروزرسانی شد.")
             else:
                 logger.warning(f"Groq API برای {symbol} پاسخ {response.status_code} داد؛ پارامترهای قبلی حفظ شدن.")
         except Exception as e:
@@ -1936,7 +2035,10 @@ class HybridTradingSystem:
 
             if self.ai_optimizer.should_optimize(symbol):
                 logger.info(f"بروزرسانی پارامترهای ضد ضرر هوش مصنوعی برای {symbol}...")
-                self.ai_optimizer.optimize_symbol_parameters(symbol, df_15m, journal=self.journal)
+                self.ai_optimizer.optimize_symbol_parameters(
+                    symbol, df_15m, journal=self.journal,
+                    macro_context=macro_context, ai_regime=self.portfolio_state.ai_regime
+                )
 
             df_1h = self.data.fetch_ohlcv(symbol, timeframe=self.config.CONFIRM_TIMEFRAME)
             df_1h = self.analysis.calculate_indicators(df_1h)
@@ -2099,7 +2201,7 @@ class HybridTradingSystem:
 • هر تغییر حالت پرتفوی با یک پیام توضیحی به تلگرام اطلاع داده می‌شه - نیازی به پیگیری دستی نیست
 
 🆕 **جدید - بودجه‌بند هوشمند سهمیه‌ی رایگان Groq:**
-• سقف واقعی روزانه (۲۰۰هزار توکن) بین سه مصرف‌کننده اولویت‌بندی شده: قضاوت هر معامله (اولویت اول، عملاً همیشه در دسترس)، رژیم کلی بازار (سهم ثابت کوچک) و تنظیم پارامتر نمادها (باقیمانده، با فرکانس پویا بین {self.config.GROQ_OPTIMIZER_MIN_INTERVAL_HOURS:g} تا {self.config.GROQ_OPTIMIZER_MAX_INTERVAL_HOURS:g} ساعت بسته به سرعت مصرف)
+• سقف واقعی روزانه (۲۰۰هزار توکن) بین سه مصرف‌کننده اولویت‌بندی شده: قضاوت هر معامله (اولویت اول، عملاً همیشه در دسترس)، رژیم کلی بازار (سهم ثابت کوچک) و تنظیم پارامتر نمادها (روزی یک‌بار، ساعت {self.config.AI_TUNE_HOUR_UTC:02d}:{self.config.AI_TUNE_MINUTE_UTC:02d} UTC، حدود ۱۲٪ سقف روزانه)
 • هدف: کیفیت قضاوت معامله هیچ‌وقت به‌خاطر کمبود سهمیه افت نکنه، و در عین حال سهمیه‌ی روزانه هیچ‌وقت واقعاً تموم نشه
 • وضعیت مصرف روزانه در گزارش روزانه تلگرام هم نمایش داده می‌شه
 """
