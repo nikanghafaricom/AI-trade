@@ -1,10 +1,19 @@
 # ==============================================
-# Hybrid Signal Bot - نسخه حرفه‌ای (Anti-Loss + Risk Management + Market Structure
-#                                    + Adaptive Portfolio State + AI Market Regime)
-# اصول به‌کاررفته: ریسک ثابت درصدی، محدودیت اکسپوژر همبسته،
-# ساختار بازار، تایید چندتایم‌فریمی، فیلتر رژیم نوسان، تریلینگ استاپ واقعی، ژورنال معاملات،
-# + لایه‌ی جدید: خودتنظیمی سراسری پرتفوی بر اساس عملکرد رولینگ اخیر (بدون نیاز به AI)
-# + لایه‌ی جدید: ارزیابی کم‌تکرار AI از رژیم کلی بازار (جدا از تنظیم پارامتر per-symbol)
+# Hybrid Signal Bot - نسخه نهایی OPT4 + تطبیق اختیاری
+#
+# بک‌تست ۶ماهه (بهترین پایه):
+#   بدون معامله BTC | ETH+SOL+BNB محور | بازدهی ~+34% | MaxDD ~19%
+#
+# تطبیق‌پذیری (اختیاری با env):
+#   ADAPTIVE_MODE=symbol_aware  → پیش‌فرض روشن: تطبیق کامل (قوانین نماد + پرامپت گاز/ترمز)
+#   ADAPTIVE_MODE=off           → یک سوییچ خاموشی: برگشت به پایه OPT4 با بیشترین سود تست‌شده
+#                                 (بدون symbol_aware و بدون تنظیم روزانه پارامتر)
+#
+# خاموش/روشن کردن لایه‌های AI از Render با env:
+#   AI_PARAM_TUNING_ENABLED=false   → تنظیم روزانه پارامتر خاموش
+#   AI_JUDGE_ENABLED=true/false     → قضاوت روی هر سیگنال
+#   AI_REGIME_ENABLED=true/false    → رژیم کلی بازار (ضریب حجم)
+#   ADAPTIVE_MODE=off|symbol_aware
 # ==============================================
 import os
 import time
@@ -61,8 +70,8 @@ class Config:
 
     GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
+    # OPT4: BTC معامله نمی‌شود — فقط ماکرو (روند/ساختار/نوسان)
     SYMBOLS = [
-        "BTC/USDT",
         "ETH/USDT",
         "SOL/USDT",
         "BNB/USDT",
@@ -75,6 +84,7 @@ class Config:
         "PAXG/USDT",
         "LTC/USDT",
     ]
+    MACRO_SYMBOL = "BTC/USDT"
 
     SYMBOL_GROUPS = {
         "BTC/USDT": "majors",
@@ -110,6 +120,14 @@ class Config:
     # روی false بذاری، AI دیگه پارامترها رو عوض نمی‌کنه و همون مقدارهای ثابت کد استفاده می‌شن.
     # (قضاوت AI روی سیگنال‌ها و ارزیابی رژیم بازار مستقل از این کلیده.)
     AI_PARAM_TUNING_ENABLED = os.getenv("AI_PARAM_TUNING_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
+    # قضاوت AI روی هر سیگنال (پیشنهاد: روشن)
+    AI_JUDGE_ENABLED = os.getenv("AI_JUDGE_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
+    # ارزیابی رژیم کلی بازار / ضریب حجم (پیشنهاد: روشن)
+    AI_REGIME_ENABLED = os.getenv("AI_REGIME_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
+    # تطبیق‌پذیری ورود: off = ثابت OPT4 | symbol_aware = بهترین نسخه تطبیقی بک‌تست (C)
+    ADAPTIVE_MODE = os.getenv("ADAPTIVE_MODE", "symbol_aware").strip().lower()
+    if ADAPTIVE_MODE not in ("off", "symbol_aware"):
+        ADAPTIVE_MODE = "off"
 
     # ---- زمان‌بندی تنظیم روزانه‌ی پارامترها توسط AI (به وقت UTC) ----
     # پیش‌فرض ۰۰:۳۰ UTC (= ۰۴:۰۰ بامداد تهران). دلیل انتخاب این ساعت:
@@ -652,20 +670,21 @@ class AIParameterOptimizer:
         "PAXG/USDT": "gold",
     }
 
-    TUNING_SYSTEM_PROMPT = """You are the parameter-tuning engine of a LONG-ONLY spot crypto signal bot (15m entries, 1h confirmation, 4h trend filter). You tune ONE symbol per call. Apply the expert methodology below exactly; do not invent your own style.
+    TUNING_SYSTEM_PROMPT = """You are the parameter-tuning engine of a LONG-ONLY spot crypto signal bot (15m entries, 1h confirmation, 4h trend filter). You tune ONE symbol per call.
+
+GOAL: real regime adaptation without thrashing.
+- GOOD market (clear bullish trend + healthy recent performance): become mildly more active — slightly shorter cooldown, slightly wider targets, allow a bit higher RSI cap. Do NOT loosen filters so much that junk signals appear.
+- BAD market (bearish/choppy/high volatility OR poor recent performance): become defensive — longer cooldown, lower RSI cap, lower stress_size_mult, nearer targets. Prefer fewer high-quality trades over forcing activity.
+- Changes must stay ANCHORED to baseline_params: move about +/-15-25% of baseline (RSI keys +/-3 to 4 points). Never jump to extremes day to day.
 
 METHOD
-1. ANCHOR: "baseline_params" are expert-calibrated starting values for this symbol. Start from them. Move a value away from baseline only when the live data clearly justifies it, and keep moves moderate: about +/-20% of the baseline value, RSI keys within +/-4 points (atr_min_filter and cooldown_minutes may move up to +/-35%). Never jump to extreme values.
-2. READ THE REGIME from live data (btc_trend_4h, btc_structure, btc_volatility_percentile, the symbol's atr_ratio_15m, ai_market_regime, fear_greed, market_note) and apply the matching profile:
- - LOW-VOLATILITY RANGE / CHOP (low volatility percentile, neutral or mixed structure): enter near range support and do not chase high RSI (rsi_buy_max_range_end about 60-62); nearer targets (tp1 1.3-1.4, tp2 2.1-2.3, tp3 3.2-3.5); tight trailing (0.8-0.9); slightly relaxed volume_mult (0.85-0.95); atr_min_filter about 0.70-0.80 x atr_ratio_15m so the filter does not choke valid signals in quiet markets; longer cooldown (90-120).
- - TRENDING BULLISH: wider targets (tp1 1.6-1.8, tp2 2.6-3.0, tp3 4.0-4.5); looser trailing (1.1-1.3); higher RSI cap (66-70); volume_mult about 1.0-1.1; shorter cooldown (70-90).
- - TRENDING BEARISH / WEAK: defensive: lower rsi_buy_min and RSI cap, cooldown 110-140, lower stress_size_mult. A low signal count is acceptable here: do NOT loosen filters just to force signals.
- - HIGH VOLATILITY / EVENT RISK: wider stop (sl_atr_mult 1.8-2.2), stress_pctl_threshold 82-85, stress_size_mult 0.45-0.55, longer cooldown.
-3. ASSET CLASS (given as asset_class): major -> stop about 1.4-1.5 ATR, moderate filters; alt -> stop 1.6-1.8, lower RSI cap and longer cooldown when it is weak versus BTC; meme -> stop about 1.9, volume_mult >= 1.1, long cooldown; gold -> low-volatility asset: stop about 1.2, nearer targets.
-4. RISK FIRST: the stop must sit beyond typical wick noise for the asset class. Always tp1 < tp2 < tp3 and rsi_buy_max_range_start < rsi_buy_max_range_end.
-5. PERFORMANCE FEEDBACK: consecutive_losses >= 2 or poor recent BUY performance (low win_rate, negative avg_r) -> longer cooldown, lower RSI cap, lower stress_size_mult. Good recent BUY performance -> you may relax slightly, never beyond the +/- limits in rule 1. Ignore stats that are null or have a tiny count.
-6. The bot is LONG-ONLY: keep every rsi_sell_* key exactly equal to its baseline value.
-7. Never make settings so tight that signals stop entirely, and never so loose that signal quality collapses.
+1. ANCHOR: start from baseline_params. Only move a value when live data clearly justifies it.
+2. READ REGIME from: btc_trend_4h, btc_structure, btc_volatility_percentile, atr_ratio_15m, ai_market_regime, fear_greed, consecutive_losses, recent_buy_performance, market_note.
+3. ASSET CLASS: major -> moderate stops; alt -> slightly wider stop / longer cooldown when weak vs BTC; meme -> higher volume_mult and longer cooldown; gold -> tight stop, nearer targets.
+4. SYMBOL BNB: be extra cautious (longer cooldown, lower size pressure via stress_size_mult) unless regime is clearly strong bullish.
+5. RISK FIRST: always tp1 < tp2 < tp3 and rsi_buy_max_range_start < rsi_buy_max_range_end. LONG-ONLY: keep every rsi_sell_* equal to baseline.
+6. PERFORMANCE: consecutive_losses >= 2 or poor recent BUY stats -> defensive. Good recent BUY stats + bullish regime -> mild gas only.
+7. Never make settings so tight that signals stop entirely, and never so loose that quality collapses.
 
 OUTPUT: only a JSON object with exactly the same keys as baseline_params and numeric values. No markdown, no extra text."""
 
@@ -809,6 +828,9 @@ OUTPUT: only a JSON object with exactly the same keys as baseline_params and num
 
     def should_optimize(self, symbol: str) -> bool:
         if not self.config.AI_PARAM_TUNING_ENABLED:
+            return False
+        # یک سوییچ کلی: اگر تطبیق خاموش باشد، روی پایه ثابت OPT4 می‌مانیم (بدون تغییر روزانه پارامتر)
+        if getattr(self.config, "ADAPTIVE_MODE", "off") == "off":
             return False
 
         # تنظیم فقط یک‌بار در روز و در ساعت مقرر (AI_TUNE_HOUR_UTC / AI_TUNE_MINUTE_UTC)
@@ -962,6 +984,11 @@ OUTPUT: only a JSON object with exactly the same keys as baseline_params and num
         برمی‌گردونه و PortfolioStateManager به‌صورت خنثی (ضریب ۱.۰) ادامه می‌ده - یعنی
         این لایه صرفاً یک تقویت‌کننده‌ی اختیاریه، نه پیش‌نیاز کارکرد سیستم.
         """
+        if not getattr(self.config, "AI_REGIME_ENABLED", True):
+            return None
+        if not self.groq_api_key:
+            return None
+
         if not self.groq_api_key:
             return None
 
@@ -1035,6 +1062,9 @@ Respond ONLY with valid JSON, no markdown, no extra text, exactly this shape:
                     pass
 
     def evaluate_trade_candidate(self, symbol: str, side: str, context: dict) -> Dict:
+        # اگر قضاوت AI خاموش باشد: سیگنال کمی مستقیم پذیرفته می‌شود (نزدیک بک‌تست OPT4)
+        if not getattr(self.config, "AI_JUDGE_ENABLED", True):
+            return {"approve": True, "confidence": 70, "reason": "قضاوت AI خاموش — تایید خودکار بر اساس امتیاز کمی"}
         default = {"approve": False, "confidence": 0, "reason": "بدون دسترسی به AI - طبق تنظیم، سیگنال رد شد (تایید AI الزامیه)"}
         if not self.groq_api_key:
             return default
@@ -1223,7 +1253,7 @@ class PortfolioStateManager:
         if result:
             self.ai_regime = result
 
-    def get_adjustments(self) -> Dict:
+    def get_adjustments(self, symbol: str = None) -> Dict:
         presets = {
             "NORMAL":    {"score_adjustment": 0.0, "confidence_adjustment": 0,  "size_mult": 1.0,  "cooldown_mult": 1.0},
             "CAUTION":   {"score_adjustment": 1.0, "confidence_adjustment": 10, "size_mult": 0.75, "cooldown_mult": 1.3},
@@ -1235,6 +1265,21 @@ class PortfolioStateManager:
         adj["defensive"] = (self.state == "DEFENSIVE")
         adj["state"] = self.state
         adj["ai_market_regime"] = (self.ai_regime or {}).get("market_regime")
+
+        # --- تطبیق اختیاری symbol_aware (بهترین نسخه تطبیقی بک‌تست = C) ---
+        mode = getattr(self.config, "ADAPTIVE_MODE", "off")
+        if mode == "symbol_aware" and symbol:
+            regime = (self.ai_regime or {}).get("market_regime") or ""
+            strong_bull = regime in ("trending_bullish",)
+            # BNB همیشه محتاط‌تر (در بک‌تست net loser نسبی)
+            if symbol == "BNB/USDT":
+                adj["score_adjustment"] = adj["score_adjustment"] + 0.6
+                adj["size_mult"] = max(0.3, adj["size_mult"] * 0.7)
+                adj["cooldown_mult"] = adj["cooldown_mult"] * 1.2
+            # ETH/SOL در روند قوی کمی فعال‌تر — بدون شل کردن شدید فیلتر
+            elif symbol in ("ETH/USDT", "SOL/USDT") and strong_bull and self.state == "NORMAL":
+                adj["cooldown_mult"] = max(0.7, adj["cooldown_mult"] * 0.85)
+                adj["size_mult"] = min(1.15, adj["size_mult"] * 1.05)
         return adj
 
 # ==================== موتور سیگنال امتیازی چندلایه ====================
@@ -2053,7 +2098,7 @@ class HybridTradingSystem:
 
             # وضعیت خودکار پرتفوی همین الان می‌گیریم - قبلاً هم در run_once و هم بعد از
             # هر بسته‌شدن معامله بازمحاسبه شده، پس همیشه به‌روزه.
-            portfolio_adjustments = self.portfolio_state.get_adjustments()
+            portfolio_adjustments = self.portfolio_state.get_adjustments(symbol=symbol)
 
             rule_signal, diagnostics = self.signal_engine.get_rule_signal(
                 symbol, df_15m, df_1h, trend_4h, symbol_macro_context, portfolio_adjustments
@@ -2146,7 +2191,7 @@ class HybridTradingSystem:
 
         # جدید: ارزیابی کم‌تکرار AI از رژیم کلی بازار - فقط وقتی سهمیه‌ی Groq اجازه بده،
         # وگرنه بدون مزاحمت رد می‌شه و سیستم به لایه‌ی محاسباتی پرتفوی تکیه می‌کنه.
-        if self.portfolio_state.should_refresh_ai_regime():
+        if self.portfolio_state.should_refresh_ai_regime() and getattr(self.config, "AI_REGIME_ENABLED", True):
             if self.ai_optimizer.quota.can_optimize() and self.ai_optimizer.budget.can_consume("regime"):
                 regime_result = self.ai_optimizer.assess_market_regime(macro_context, self.portfolio_state.get_stats())
                 self.portfolio_state.set_ai_regime(regime_result)
@@ -2180,7 +2225,10 @@ class HybridTradingSystem:
         if not self.telegram.test_connection():
             logger.error("اتصال تلگرام برقرار نشد! توکن یا chat_id رو چک کن.")
 
-        start_message = f"""🛡 **نسخه حرفه‌ای + خودتنظیمی سراسری فعال شد.**
+        start_message = f"""🛡 **نسخه نهایی OPT4 فعال شد.**
+
+📌 BTC معامله نمی‌شود (فقط ماکرو) | پایه بک‌تست: ~+34% / DD~19%
+🔧 env: ADAPTIVE_MODE={self.config.ADAPTIVE_MODE} | AI_JUDGE={self.config.AI_JUDGE_ENABLED} | AI_TUNE={self.config.AI_PARAM_TUNING_ENABLED} | AI_REGIME={self.config.AI_REGIME_ENABLED}
 
 امکانات:
 • مدیریت سرمایه ریسک‌محور (ریسک پایه {self.config.RISK_PER_TRADE_PCT}% در هر معامله)
