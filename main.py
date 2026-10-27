@@ -1,4 +1,4 @@
-7# ==============================================
+# ==============================================
 # Hybrid Signal Bot - نسخه نهایی OPT4 + تطبیق اختیاری
 #
 # بک‌تست ۶ماهه (بهترین پایه):
@@ -47,7 +47,31 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         return
 
+def start_health_check_server():
+    port = int(os.environ.get("PORT", 10000))
+    try:
+        server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+        server.serve_forever()
+    except Exception as e:
+        logger.error(f"خطا در اجرای وب‌سرور: {e}")
 
+threading.Thread(target=start_health_check_server, daemon=True).start()
+
+# ==================== تنظیمات ====================
+class Config:
+    EXCHANGE_ID = "binance"
+    API_KEY = os.getenv("EXCHANGE_API_KEY", "")
+    SECRET = os.getenv("EXCHANGE_SECRET", "")
+    PASSWORD = os.getenv("EXCHANGE_PASSWORD", "")
+
+    TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+    TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+    PERSONAL_CHAT_ID = os.getenv("PERSONAL_CHAT_ID")
+
+    GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+
+    # OPT4: BTC معامله نمی‌شود — فقط ماکرو (روند/ساختار/نوسان)
+    SYMBOLS = [
         "ETH/USDT",
         "SOL/USDT",
         "BNB/USDT",
