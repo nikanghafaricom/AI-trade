@@ -1,19 +1,19 @@
 # ==============================================
-# Hybrid Signal Bot - نسخه نهایی OPT4 + تطبیق اختیاری
+# Hybrid Signal Bot - نسخه حرفه‌ای فنی (Technical Elite)
 #
-# بک‌تست ۶ماهه (بهترین پایه):
-#   بدون معامله BTC | ETH+SOL+BNB محور | بازدهی ~+34% | MaxDD ~19%
+# تمرکز اصلی این نسخه:
+#   - ساختار بازار حرفه‌ای‌تر (سوئینگ تمیز + تشخیص تغییر ساختار)
+#   - امتیازدهی بر اساس confluence واقعی (روند + ساختار + حجم + مومنتوم)
+#   - وزن بالاتر به تایم‌فریم بالاتر و هم‌راستایی چندتایم‌فریمی
+#   - قضاوت AI بر اساس کیفیت تکنیکال (نه فقط سخت‌گیری عددی)
+#   - مدیریت ریسک منطقی و کارشناسی (نه افراطی)
 #
-# تطبیق‌پذیری (اختیاری با env):
-#   ADAPTIVE_MODE=symbol_aware  → پیش‌فرض روشن: تطبیق کامل (قوانین نماد + پرامپت گاز/ترمز)
-#   ADAPTIVE_MODE=off           → یک سوییچ خاموشی: برگشت به پایه OPT4 با بیشترین سود تست‌شده
-#                                 (بدون symbol_aware و بدون تنظیم روزانه پارامتر)
+# پایه قبلی OPT4: بدون معامله BTC | بازدهی بک‌تست ~+34% | MaxDD ~19%
+# هدف: سیگنال‌های باکیفیت‌تر با حفظ تعداد منطقی، نزدیک به روش تریدرهای سطح بالا
 #
-# خاموش/روشن کردن لایه‌های AI از Render با env:
-#   AI_PARAM_TUNING_ENABLED=false   → تنظیم روزانه پارامتر خاموش
-#   AI_JUDGE_ENABLED=true/false     → قضاوت روی هر سیگنال
-#   AI_REGIME_ENABLED=true/false    → رژیم کلی بازار (ضریب حجم)
-#   ADAPTIVE_MODE=off|symbol_aware
+# envهای کلیدی:
+#   ADAPTIVE_MODE=symbol_aware|off
+#   AI_PARAM_TUNING_ENABLED / AI_JUDGE_ENABLED / AI_REGIME_ENABLED
 # ==============================================
 import os
 import time
@@ -106,15 +106,15 @@ class Config:
     TREND_TIMEFRAME = "4h"
     CHECK_INTERVAL = 300
 
-    MIN_SIGNAL_SCORE = 7.5
-    ATR_PERCENTILE_MAX = 97
+    MIN_SIGNAL_SCORE = 7.6
+    ATR_PERCENTILE_MAX = 96
 
     VIRTUAL_CAPITAL_USDT = float(os.getenv("VIRTUAL_CAPITAL_USDT", 10000))
-    RISK_PER_TRADE_PCT = float(os.getenv("RISK_PER_TRADE_PCT", 1.5))
-    MAX_CONCURRENT_TRADES = int(os.getenv("MAX_CONCURRENT_TRADES", 4))
+    RISK_PER_TRADE_PCT = float(os.getenv("RISK_PER_TRADE_PCT", 1.2))
+    MAX_CONCURRENT_TRADES = int(os.getenv("MAX_CONCURRENT_TRADES", 3))
     MAX_TRADES_PER_GROUP = int(os.getenv("MAX_TRADES_PER_GROUP", 2))
 
-    MIN_JUDGE_CONFIDENCE = int(os.getenv("MIN_JUDGE_CONFIDENCE", 55))
+    MIN_JUDGE_CONFIDENCE = int(os.getenv("MIN_JUDGE_CONFIDENCE", 58))
 
     # ---- کلید روشن/خاموش تنظیم خودکار پارامترها توسط AI ----
     # روی false بذاری، AI دیگه پارامترها رو عوض نمی‌کنه و همون مقدارهای ثابت کد استفاده می‌شن.
@@ -368,27 +368,56 @@ class AnalysisLayer:
             return bool(latest['ema_fast'] > latest['ema_slow'])
         return bool(latest['ema_fast'] < latest['ema_slow'])
 
-    def market_structure(self, df: pd.DataFrame, lookback: int = 40) -> str:
-        if df.empty or len(df) < lookback + 4:
+    def market_structure(self, df: pd.DataFrame, lookback: int = 50) -> str:
+        """
+        ساختار بازار حرفه‌ای‌تر:
+        - سوئینگ‌های تمیزتر با فیلتر نویز قوی‌تر
+        - Higher High + Higher Low = BULLISH
+        - Lower High + Lower Low = BEARISH
+        - تشخیص سبک Change of Structure / BOS
+        """
+        if df.empty or len(df) < lookback + 6:
             return "NEUTRAL"
+
         window = df.tail(lookback).reset_index(drop=True)
-        swing_highs, swing_lows = [], []
-        for i in range(2, len(window) - 2):
-            h = window['high']
-            l = window['low']
-            if h[i] > h[i - 1] and h[i] > h[i - 2] and h[i] > h[i + 1] and h[i] > h[i + 2]:
-                swing_highs.append(h[i])
-            if l[i] < l[i - 1] and l[i] < l[i - 2] and l[i] < l[i + 1] and l[i] < l[i + 2]:
-                swing_lows.append(l[i])
-        if len(swing_highs) >= 2 and len(swing_lows) >= 2:
-            higher_high = swing_highs[-1] > swing_highs[-2]
-            higher_low = swing_lows[-1] > swing_lows[-2]
-            lower_high = swing_highs[-1] < swing_highs[-2]
-            lower_low = swing_lows[-1] < swing_lows[-2]
-            if higher_high and higher_low:
-                return "BULLISH"
-            if lower_high and lower_low:
-                return "BEARISH"
+        highs = window['high'].values
+        lows = window['low'].values
+        closes = window['close'].values
+
+        swing_highs = []
+        swing_lows = []
+
+        for i in range(3, len(window) - 3):
+            if (highs[i] > highs[i-1] and highs[i] > highs[i-2] and highs[i] > highs[i-3] and
+                highs[i] > highs[i+1] and highs[i] > highs[i+2] and highs[i] > highs[i+3]):
+                swing_highs.append((i, highs[i]))
+            if (lows[i] < lows[i-1] and lows[i] < lows[i-2] and lows[i] < lows[i-3] and
+                lows[i] < lows[i+1] and lows[i] < lows[i+2] and lows[i] < lows[i+3]):
+                swing_lows.append((i, lows[i]))
+
+        if len(swing_highs) < 2 or len(swing_lows) < 2:
+            return "NEUTRAL"
+
+        last_hh, prev_hh = swing_highs[-1][1], swing_highs[-2][1]
+        last_ll, prev_ll = swing_lows[-1][1], swing_lows[-2][1]
+
+        higher_high = last_hh > prev_hh
+        higher_low = last_ll > prev_ll
+        lower_high = last_hh < prev_hh
+        lower_low = last_ll < prev_ll
+
+        if higher_high and higher_low:
+            return "BULLISH"
+        if lower_high and lower_low:
+            return "BEARISH"
+
+        # تشخیص تغییر ساختار (سبک BOS / CHoCH)
+        last_close = closes[-1]
+        if higher_low and last_close > prev_hh:
+            return "BULLISH"
+        if lower_high and last_close < prev_ll:
+            return "BEARISH"
+
         return "NEUTRAL"
 
     def atr_percentile(self, df: pd.DataFrame, window: int = 100) -> float:
@@ -1102,16 +1131,29 @@ Respond ONLY with valid JSON, no markdown, no extra text, exactly this shape:
             return {"approve": False, "confidence": 0,
                     "reason": "سهمیه‌ی رایگان Groq تموم شده - طبق تنظیم، سیگنال رد شد (تایید AI الزامیه)"}
 
-        prompt = f"""You are a veteran discretionary crypto trader with 15+ years of experience. You deeply understand that markets are not static: regimes shift, correlations break down, momentum exhausts, and no fixed rule set can fully capture that. You are reviewing a trade candidate that ALREADY passed a strict quantitative multi-factor scoring system (trend, RSI momentum, MACD, volume, market structure, multi-timeframe alignment, volatility regime).
+        prompt = f"""You are an elite professional crypto trader focused on high-quality technical setups. You read market structure, multi-timeframe confluence, volume confirmation, and momentum quality. You do not approve average or forced trades.
 
-Your only job now is the kind of contextual judgment an elite human trader adds on top of a systematic setup: given everything below, does the broader picture actually support taking this trade right now, or is there something about the current context (exhaustion, conflicting signals, thin/erratic volume, the symbol's recent losing streak, over-extension, or a portfolio-wide defensive state) that says skip it even though the numbers look fine?
+This candidate already passed quantitative filters (trend, RSI, MACD, volume, structure, MTF). Your job is the final professional technical judgment:
+
+Approve when the technical picture is clean and high-quality:
+- Higher-timeframe bias and structure are supportive
+- Momentum and volume confirm the move
+- Entry is not chasing an extended move
+- No clear signs of exhaustion or conflicting structure
+
+Reject when:
+- Structure is messy or conflicting across timeframes
+- Volume is weak or erratic relative to the move
+- Price looks over-extended without a proper pullback/base
+- Portfolio is in defensive state or the symbol has recent consecutive losses
+- Overall context feels forced rather than high-probability
 
 Trade candidate:
 Symbol: {symbol}
 Side: {side}
-Full context (includes portfolio_state / portfolio_rolling_stats fields showing this bot's own recent aggregate performance across ALL symbols, not just this one): {json.dumps(context, ensure_ascii=False)}
+Full context: {json.dumps(context, ensure_ascii=False)}
 
-Respond ONLY with valid JSON, no markdown, no extra text, in exactly this shape:
+Respond ONLY with valid JSON, no markdown, no extra text:
 {{"approve": true or false, "confidence": integer 0-100, "reason": "one concise sentence in Persian explaining the judgment"}}
 """
         headers = {"Authorization": f"Bearer {self.groq_api_key}", "Content-Type": "application/json"}
@@ -1290,27 +1332,55 @@ class SignalEngine:
         self.analysis = analysis
 
     def _score_buy(self, latest, prev, p) -> float:
+        """
+        امتیازدهی تخصصی بر اساس confluence واقعی:
+        روند کوتاه‌مدت + مومنتوم تمیز + حجم تأییدکننده + نزدیکی به حمایت
+        """
         score = 0.0
+
+        # روند کوتاه‌مدت و موقعیت قیمت
         if latest['ema_fast'] > latest['ema_slow']:
-            score += 2.0
+            score += 1.8
+            if latest['close'] > latest['ema_fast']:
+                score += 0.7
+
+        # RSI: کراس تمیز ارزش بیشتری دارد
         rsi_cross = latest['rsi'] > p["rsi_buy_min"] and prev['rsi'] <= p["rsi_buy_min"]
-        rsi_zone = p["rsi_buy_max_range_start"] <= latest['rsi'] <= p["rsi_buy_max_range_end"] and latest['rsi'] > prev['rsi']
+        rsi_zone = (p["rsi_buy_max_range_start"] <= latest['rsi'] <= p["rsi_buy_max_range_end"]
+                    and latest['rsi'] > prev['rsi'])
         if rsi_cross:
-            score += 2.5
+            score += 2.6
         elif rsi_zone:
-            score += 1.5
+            score += 1.4
+
+        # MACD: هیستوگرام مثبت و در حال گسترش
         if not pd.isna(latest.get('macd_hist', float('nan'))):
-            if latest['macd_hist'] > 0:
-                score += 1.0
-            elif latest['macd_hist'] > prev.get('macd_hist', 0):
-                score += 0.5
+            macd_now = latest['macd_hist']
+            macd_prev = prev.get('macd_hist', 0)
+            if macd_now > 0 and macd_now > macd_prev:
+                score += 1.4
+            elif macd_now > 0:
+                score += 0.8
+            elif macd_now > macd_prev:
+                score += 0.4
+
+        # حجم تأییدکننده
         vol_ratio = latest['volume'] / latest['vol_sma'] if latest['vol_sma'] else 0
-        if vol_ratio >= p["volume_mult"]:
-            score += 1.5
-        elif vol_ratio >= p["volume_mult"] * 0.8:
-            score += 0.75
-        if latest['support'] > 0 and (latest['close'] - latest['support']) / latest['close'] < 0.02:
-            score += 0.75
+        if vol_ratio >= p["volume_mult"] * 1.2:
+            score += 1.7
+        elif vol_ratio >= p["volume_mult"]:
+            score += 1.2
+        elif vol_ratio >= p["volume_mult"] * 0.85:
+            score += 0.5
+
+        # نزدیکی به حمایت
+        if latest['support'] > 0:
+            dist_to_support = (latest['close'] - latest['support']) / latest['close']
+            if dist_to_support < 0.012:
+                score += 1.1
+            elif dist_to_support < 0.025:
+                score += 0.5
+
         return score
 
     def get_rule_signal(self, symbol: str, df_15m: pd.DataFrame, df_1h: pd.DataFrame, trend_4h: str,
@@ -1359,32 +1429,30 @@ class SignalEngine:
         structure = self.analysis.market_structure(df_15m)
 
         # ---- فقط پوزیشن Long/BUY (اسپات) ----
-        # در حالت DEFENSIVE پرتفوی (چند ضرر متوالی/expectancy منفی)، حالت NEUTRAL+ساختار
-        # صعودی دیگه مجاز نیست و فقط روند خالص BULLISH در تایم‌فریم 4h سیگنال می‌ده - این
-        # همون جایی‌یه که سیستم به‌خاطر عملکرد ضعیف اخیر، خودش سخت‌گیرتر شده.
+        # منطق حرفه‌ای: وزن اصلی به هم‌راستایی تایم‌فریم بالاتر + ساختار تمیز
         if defensive_mode:
             buy_score = self._score_buy(latest, prev, p) if trend_4h == "BULLISH" else 0.0
         elif trend_4h == "BULLISH":
             buy_score = self._score_buy(latest, prev, p)
         elif trend_4h == "NEUTRAL" and structure == "BULLISH":
-            buy_score = self._score_buy(latest, prev, p) * 0.85
+            buy_score = self._score_buy(latest, prev, p) * 0.75
         else:
             buy_score = 0.0
 
+        # وزن‌دهی تخصصی‌تر به confluence
         if trend_4h == "BULLISH":
-            buy_score += 1.0
-
+            buy_score += 1.4
         if structure == "BULLISH":
-            buy_score += 1.5
-
+            buy_score += 1.8
         if buy_score > 0 and self.analysis.is_mtf_aligned(df_1h, "BUY"):
-            buy_score += 1.5
+            buy_score += 1.6
 
+        # هم‌راستایی با بیت‌کوین (ماکرو)
         if symbol != "BTC/USDT" and btc_trend_4h and btc_structure:
             if btc_trend_4h == "BEARISH" and btc_structure == "BEARISH":
-                buy_score -= 1.0
+                buy_score -= 1.3
             elif btc_trend_4h == "BULLISH" and btc_structure == "BULLISH":
-                buy_score += 1.0
+                buy_score += 1.2
 
         if fng is not None:
             if fng <= 20:
@@ -1526,6 +1594,9 @@ class RiskManager:
 
     def can_open_trade(self, symbol: str, active_trades: Dict, correlation_manager: Optional["CorrelationManager"] = None,
                         btc_volatility_pctl: Optional[float] = None) -> Tuple[bool, str]:
+        if len(active_trades) >= self.config.MAX_CONCURRENT_TRADES:
+            return False, f"به سقف تعداد پوزیشن‌های همزمان ({self.config.MAX_CONCURRENT_TRADES}) رسیدیم"
+
         if correlation_manager is not None:
             threshold = correlation_manager.get_dynamic_threshold(btc_volatility_pctl)
             corr_count = correlation_manager.correlated_count(symbol, active_trades, threshold)
