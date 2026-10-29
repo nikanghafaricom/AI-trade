@@ -1,15 +1,16 @@
 # ==============================================
-# Hybrid Signal Bot - نسخه حرفه‌ای فنی (Technical Elite)
+# Hybrid Signal Bot - نسخه Elite v2 (کیفیت در بازار بد)
 #
-# تمرکز اصلی این نسخه:
-#   - ساختار بازار حرفه‌ای‌تر (سوئینگ تمیز + تشخیص تغییر ساختار)
-#   - امتیازدهی بر اساس confluence واقعی (روند + ساختار + حجم + مومنتوم)
-#   - وزن بالاتر به تایم‌فریم بالاتر و هم‌راستایی چندتایم‌فریمی
-#   - قضاوت AI بر اساس کیفیت تکنیکال (نه فقط سخت‌گیری عددی)
-#   - مدیریت ریسک منطقی و کارشناسی (نه افراطی)
+# هدف اصلی این نسخه:
+#   در بازار بد (choppy / bearish) همچنان ۱–۲ سیگنال باکیفیت در روز بدهد
+#   ولی فقط ستاپ‌های تمیزتر را قبول کند تا احتمال سود حدود ۲٪ بالاتر برود
+#   و کمتر −۱R کامل بخورد.
 #
-# پایه قبلی OPT4: بدون معامله BTC | بازدهی بک‌تست ~+34% | MaxDD ~19%
-# هدف: سیگنال‌های باکیفیت‌تر با حفظ تعداد منطقی، نزدیک به روش تریدرهای سطح بالا
+# تغییرات کلیدی نسبت به نسخه قبل:
+#   - در رژیم ضعیف: ساختار BULLISH تقریباً اجباری + هم‌راستایی ۱ساعته قوی‌تر
+#   - جریمه ورود over-extended (RSI بالا) در بازار بد
+#   - وزن بالاتر به confluence تمیز
+#   - خاموش مطلق نمی‌شود، اما کیفیت ورود بالاتر می‌رود
 #
 # envهای کلیدی:
 #   ADAPTIVE_MODE=symbol_aware|off
@@ -1298,8 +1299,8 @@ class PortfolioStateManager:
     def get_adjustments(self, symbol: str = None) -> Dict:
         presets = {
             "NORMAL":    {"score_adjustment": 0.0, "confidence_adjustment": 0,  "size_mult": 1.0,  "cooldown_mult": 1.0},
-            "CAUTION":   {"score_adjustment": 1.0, "confidence_adjustment": 10, "size_mult": 0.75, "cooldown_mult": 1.3},
-            "DEFENSIVE": {"score_adjustment": 2.0, "confidence_adjustment": 20, "size_mult": 0.5,  "cooldown_mult": 1.8},
+            "CAUTION":   {"score_adjustment": 0.7, "confidence_adjustment": 8,  "size_mult": 0.80, "cooldown_mult": 1.25},
+            "DEFENSIVE": {"score_adjustment": 1.5, "confidence_adjustment": 12, "size_mult": 0.60, "cooldown_mult": 1.5},
         }
         adj = dict(presets[self.state])
         ai_mult = (self.ai_regime or {}).get("aggressiveness_mult", 1.0)
@@ -1427,32 +1428,53 @@ class SignalEngine:
             return None, {}
 
         structure = self.analysis.market_structure(df_15m)
+        ai_regime = portfolio_adjustments.get("ai_market_regime") or ""
+        weak_regime = ai_regime in ("choppy_range", "trending_bearish", "high_volatility", "uncertain")
 
         # ---- فقط پوزیشن Long/BUY (اسپات) ----
-        # منطق حرفه‌ای: وزن اصلی به هم‌راستایی تایم‌فریم بالاتر + ساختار تمیز
-        if defensive_mode:
-            buy_score = self._score_buy(latest, prev, p) if trend_4h == "BULLISH" else 0.0
+        # منطق حرفه‌ای + کیفیت بالاتر در بازار بد:
+        # در رژیم ضعیف فقط ستاپ‌های تمیز (ساختار BULLISH + روند حمایتی) قبول می‌شوند
+        # تا هم خاموش مطلق نشود و هم سیگنال‌های ضعیف −۱R نخورند.
+        if defensive_mode or weak_regime:
+            # در بازار بد یا حالت تدافعی: فقط وقتی ساختار واضح صعودی و روند ۴ساعته حمایت کند
+            if trend_4h == "BULLISH" and structure == "BULLISH":
+                buy_score = self._score_buy(latest, prev, p)
+            elif trend_4h == "BULLISH" and structure != "BEARISH":
+                buy_score = self._score_buy(latest, prev, p) * 0.70  # کمی سخت‌گیرانه‌تر
+            else:
+                buy_score = 0.0
         elif trend_4h == "BULLISH":
             buy_score = self._score_buy(latest, prev, p)
         elif trend_4h == "NEUTRAL" and structure == "BULLISH":
-            buy_score = self._score_buy(latest, prev, p) * 0.75
+            buy_score = self._score_buy(latest, prev, p) * 0.80
         else:
             buy_score = 0.0
 
         # وزن‌دهی تخصصی‌تر به confluence
         if trend_4h == "BULLISH":
-            buy_score += 1.4
+            buy_score += 1.5
         if structure == "BULLISH":
-            buy_score += 1.8
+            buy_score += 1.9
         if buy_score > 0 and self.analysis.is_mtf_aligned(df_1h, "BUY"):
-            buy_score += 1.6
+            buy_score += 1.7
+
+        # در رژیم ضعیف، هم‌راستایی ۱ساعته تقریباً اجباری می‌شود
+        if weak_regime and buy_score > 0 and not self.analysis.is_mtf_aligned(df_1h, "BUY"):
+            buy_score *= 0.55
 
         # هم‌راستایی با بیت‌کوین (ماکرو)
         if symbol != "BTC/USDT" and btc_trend_4h and btc_structure:
             if btc_trend_4h == "BEARISH" and btc_structure == "BEARISH":
-                buy_score -= 1.3
+                buy_score -= 1.5
             elif btc_trend_4h == "BULLISH" and btc_structure == "BULLISH":
-                buy_score += 1.2
+                buy_score += 1.3
+
+        # جلوگیری از ورود over-extended در بازار بد
+        if weak_regime and not pd.isna(latest.get('rsi', float('nan'))):
+            if latest['rsi'] >= 68:
+                buy_score -= 1.8
+            elif latest['rsi'] >= 62:
+                buy_score -= 0.9
 
         if fng is not None:
             if fng <= 20:
