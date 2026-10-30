@@ -96,8 +96,8 @@ class Config:
     TREND_TIMEFRAME = "4h"
     CHECK_INTERVAL = 300
 
-    MIN_SIGNAL_SCORE = 8.0   # کمی بالاتر برای کیفیت سیگنال (قبلاً 7.5)
-    ATR_PERCENTILE_MAX = 95  # قبلاً 97 — نوسان خیلی بالا را زودتر فیلتر می‌کند
+    MIN_SIGNAL_SCORE = 7.8   # تعادل بین کیفیت و تعداد سیگنال
+    ATR_PERCENTILE_MAX = 97  # برگشت به مقدار اصلی — مقدار 95 تقریباً همه سیگنال‌ها را قفل کرده بود
 
     VIRTUAL_CAPITAL_USDT = float(os.getenv("VIRTUAL_CAPITAL_USDT", 10000))
     RISK_PER_TRADE_PCT = float(os.getenv("RISK_PER_TRADE_PCT", 1.5))
@@ -308,7 +308,7 @@ class AnalysisLayer:
         if pd.isna(latest['volume']) or pd.isna(latest['vol_sma']) or latest['vol_sma'] == 0:
             return False
         volume_ratio = latest['volume'] / latest['vol_sma']
-        if volume_ratio < 0.85:  # قبلاً 0.6 بود — الان حداقل نزدیک میانگین لازم است
+        if volume_ratio < 0.75:  # تعادل: نه به شلی 0.6 قبلی، نه به سختی 0.85 که سیگنال را قفل می‌کرد
             return False
         return True
 
@@ -383,12 +383,12 @@ class AnalysisLayer:
         return "NEUTRAL"
 
     def is_price_in_buy_zone(self, latest: pd.Series, atr: float) -> bool:
-        """قیمت باید نزدیک حمایت یا بالای EMA سریع باشد (نه در بالای رنج ضعیف)."""
+        """قیمت باید نزدیک حمایت یا بالای EMA سریع باشد (نه در بالای رنج ضعیف). کمی نرم‌تر از نسخه خیلی سخت."""
         if pd.isna(atr) or atr <= 0:
             return False
-        near_support = latest['support'] > 0 and (latest['close'] - latest['support']) / latest['close'] < 0.025
-        above_fast_ema = latest['close'] > latest['ema_fast']
-        not_overextended = (latest['close'] - latest['ema_slow']) / latest['close'] < 0.04
+        near_support = latest['support'] > 0 and (latest['close'] - latest['support']) / latest['close'] < 0.035
+        above_fast_ema = latest['close'] > latest['ema_fast'] * 0.998  # کمی تلرانس
+        not_overextended = (latest['close'] - latest['ema_slow']) / latest['close'] < 0.055
         return (near_support or above_fast_ema) and not_overextended
 
     def atr_percentile(self, df: pd.DataFrame, window: int = 100) -> float:
@@ -1207,20 +1207,20 @@ class SignalEngine:
                 score += 0.4
 
         vol_ratio = latest['volume'] / latest['vol_sma'] if latest['vol_sma'] else 0
-        if vol_ratio >= p["volume_mult"] * 1.15:   # حجم قوی‌تر از قبل
+        if vol_ratio >= p["volume_mult"] * 1.15:
             score += 2.0
         elif vol_ratio >= p["volume_mult"]:
-            score += 1.2
-        elif vol_ratio >= p["volume_mult"] * 0.9:
-            score += 0.5
+            score += 1.3
+        elif vol_ratio >= p["volume_mult"] * 0.85:
+            score += 0.7
         else:
-            return 0.0  # حجم ضعیف = رد کامل
+            return 0.0  # حجم خیلی ضعیف = رد
 
         # نزدیکی به حمایت یا قرارگیری منطقی قیمت
-        if latest['support'] > 0 and (latest['close'] - latest['support']) / latest['close'] < 0.022:
+        if latest['support'] > 0 and (latest['close'] - latest['support']) / latest['close'] < 0.028:
             score += 1.2
         elif latest['close'] > latest['ema_fast']:
-            score += 0.6
+            score += 0.7
 
         return score
 
@@ -1299,8 +1299,8 @@ class SignalEngine:
         if trend_4h == "BULLISH":
             buy_score += 1.5
         elif trend_4h == "NEUTRAL" and structure == "BULLISH":
-            buy_score *= 0.70   # قبلاً 0.85 بود — الان خیلی سخت‌تر
-            buy_score += 0.3
+            buy_score *= 0.78   # تعادل: نه به شلی 0.85 قبلی، نه به سختی 0.70
+            buy_score += 0.4
         else:
             return None, {}
 
@@ -1348,7 +1348,7 @@ class SignalEngine:
                     buy_score -= 0.7
 
         # آستانه پویا + کمی بالاتر از قبل برای کیفیت
-        base_threshold = self.config.MIN_SIGNAL_SCORE + 0.4   # کمی سخت‌تر از ۷.۵
+        base_threshold = self.config.MIN_SIGNAL_SCORE + 0.2
         threshold = base_threshold + score_adjustment
         vol_ratio = latest['volume'] / latest['vol_sma'] if latest['vol_sma'] else 0
         diagnostics = {
@@ -1821,11 +1821,20 @@ class TelegramSender:
 
     def send_system_status(self, text: str):
         try:
+            # اول با Markdown امتحان می‌کنیم؛ اگر parse خطا داد، بدون parse_mode می‌فرستیم
             r = requests.post(f"{self.base_url}/sendMessage",
                                json={"chat_id": self.config.TELEGRAM_CHAT_ID, "text": text, "parse_mode": "Markdown"},
                                timeout=10)
             if r.status_code != 200:
-                logger.error(f"ارسال پیام وضعیت ناموفق بود: {r.status_code} {r.text}")
+                err = r.text
+                if "can't parse entities" in err.lower() or "parse" in err.lower():
+                    r2 = requests.post(f"{self.base_url}/sendMessage",
+                                       json={"chat_id": self.config.TELEGRAM_CHAT_ID, "text": text},
+                                       timeout=10)
+                    if r2.status_code != 200:
+                        logger.error(f"ارسال پیام وضعیت ناموفق بود: {r2.status_code} {r2.text}")
+                else:
+                    logger.error(f"ارسال پیام وضعیت ناموفق بود: {r.status_code} {err}")
         except Exception as e:
             logger.error(f"خطای ارسال پیام به تلگرام: {e}")
 
