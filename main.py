@@ -1781,15 +1781,28 @@ class TelegramSender:
             logger.error(f"❌ خطا در تست اتصال تلگرام: {e}")
             return False
 
-    def send_system_status(self, text: str):
+    def _post_message(self, chat_id, text: str) -> bool:
+        """ارسال با Markdown؛ اگه تلگرام متن رو پارس نکرد، بدون فرمت دوباره می‌فرسته."""
         try:
             r = requests.post(f"{self.base_url}/sendMessage",
-                               json={"chat_id": self.config.TELEGRAM_CHAT_ID, "text": text, "parse_mode": "Markdown"},
+                               json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"},
                                timeout=10)
-            if r.status_code != 200:
-                logger.error(f"ارسال پیام وضعیت ناموفق بود: {r.status_code} {r.text}")
+            if r.status_code == 200:
+                return True
+            logger.error(f"ارسال پیام با Markdown ناموفق بود: {r.status_code} {r.text}")
+            r2 = requests.post(f"{self.base_url}/sendMessage",
+                                json={"chat_id": chat_id, "text": text.replace("*", "")},
+                                timeout=10)
+            if r2.status_code != 200:
+                logger.error(f"ارسال پیام بدون فرمت هم ناموفق بود: {r2.status_code} {r2.text}")
+                return False
+            return True
         except Exception as e:
             logger.error(f"خطای ارسال پیام به تلگرام: {e}")
+            return False
+
+    def send_system_status(self, text: str):
+        self._post_message(self.config.TELEGRAM_CHAT_ID, text)
 
     def send_personal_message(self, text: str):
         target_id = self.config.PERSONAL_CHAT_ID or self.config.TELEGRAM_CHAT_ID
@@ -2018,7 +2031,7 @@ class HybridTradingSystem:
 
             if self.config.PURE_RULES_MODE:
                 # حالت خالص قوانین (مثل بک‌تست) — بدون قضاوت AI
-                judge = {"approve": True, "confidence": 100, "reason": "حالت PURE_RULES (بدون AI)"}
+                judge = {"approve": True, "confidence": 100, "reason": "حالت فقط قوانین (بدون AI)"}
             else:
                 judge = self.ai_optimizer.evaluate_trade_candidate(symbol, rule_signal, diagnostics)
 
@@ -2118,7 +2131,7 @@ class HybridTradingSystem:
         if not self.telegram.test_connection():
             logger.error("اتصال تلگرام برقرار نشد! توکن یا chat_id رو چک کن.")
 
-        mode_note = "\n\n⚙️ **حالت فعلی: PURE_RULES (بدون هیچ هوش مصنوعی — مثل بک‌تست)**" if self.config.PURE_RULES_MODE else "\n\n🧠 **حالت فعلی: کامل با لایه‌های AI**"
+        mode_note = "\n\n⚙️ **حالت فعلی: فقط قوانین (بدون هیچ هوش مصنوعی — مثل بک‌تست)**" if self.config.PURE_RULES_MODE else "\n\n🧠 **حالت فعلی: کامل با لایه‌های AI**"
         start_message = f"""🛡 **نسخه حرفه‌ای v2 + خودتنظیمی سراسری فعال شد.**{mode_note}
 
 امکانات:
