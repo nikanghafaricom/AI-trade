@@ -97,8 +97,25 @@ class Config:
     TREND_TIMEFRAME = "4h"
     CHECK_INTERVAL = 300
 
-    MIN_SIGNAL_SCORE = 8.5
-    ATR_PERCENTILE_MAX = 97
+    # ---- پارامترهای تحلیل خشک (هم‌راستا با paper_trading_bot.py / بک‌تست ۶ ماهه) ----
+    MIN_SIGNAL_SCORE = 9.8
+    ATR_PERCENTILE_MAX = 91
+
+    # مقادیر پایه‌ی کلیدهای «تحلیلی» (RSI / حجم / فیلتر ATR). فقط همین کلیدها روی پارامترهای
+    # اولیه‌ی هر نماد اعمال می‌شن؛ پارامترهای خروج (SL/TP/Trailing) دست‌نخورده‌ن.
+    ANALYSIS_DEFAULT_PARAMS = {
+        "rsi_buy_min": 40,
+        "rsi_buy_max_range_start": 46,
+        "rsi_buy_max_range_end": 68,
+        "volume_mult": 1.05,
+        "atr_min_filter": 0.0016,
+    }
+    ANALYSIS_SYMBOL_OVERRIDES = {
+        "SOL/USDT":  {"atr_min_filter": 0.0015, "rsi_buy_max_range_end": 70},
+        "AVAX/USDT": {"atr_min_filter": 0.0015},
+        "NEAR/USDT": {"atr_min_filter": 0.0015},
+        "XRP/USDT":  {"atr_min_filter": 0.0017},
+    }
 
     VIRTUAL_CAPITAL_USDT = float(os.getenv("VIRTUAL_CAPITAL_USDT", 10000))
     RISK_PER_TRADE_PCT = float(os.getenv("RISK_PER_TRADE_PCT", 1.2))
@@ -272,14 +289,14 @@ class AnalysisLayer:
         self.config = config
 
     def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-        if df.empty or len(df) < 30:
+        if df.empty or len(df) < 50:
             return df
         df = df.copy()
 
         delta = df['close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        rs = gain / loss
+        rs = gain / (loss + 1e-12)
         df['rsi'] = 100 - (100 / (1 + rs))
 
         df['ema_fast'] = df['close'].ewm(span=20, adjust=False).mean()
@@ -613,7 +630,12 @@ class AIParameterOptimizer:
 
         self.symbol_states = {}
         for sym in config.SYMBOLS:
-            merged_params = {**default_params, **SYMBOL_PARAM_OVERRIDES.get(sym, {})}
+            merged_params = {
+                **default_params,
+                **config.ANALYSIS_DEFAULT_PARAMS,
+                **SYMBOL_PARAM_OVERRIDES.get(sym, {}),
+                **config.ANALYSIS_SYMBOL_OVERRIDES.get(sym, {}),
+            }
             self.symbol_states[sym] = {
                 "last_optimized_time": None,
                 "consecutive_losses": 0,
@@ -1175,8 +1197,6 @@ class SignalEngine:
                 score += 1.2
             elif latest['macd_hist'] > 0:
                 score += 0.6
-            elif latest['macd_hist'] > prev.get('macd_hist', 0):
-                score += 0.3
         vol_ratio = latest['volume'] / latest['vol_sma'] if latest['vol_sma'] else 0
         if vol_ratio >= p["volume_mult"] * 1.15:
             score += 1.8
@@ -1198,7 +1218,7 @@ class SignalEngine:
 
     def get_rule_signal(self, symbol: str, df_15m: pd.DataFrame, df_1h: pd.DataFrame, trend_4h: str,
                          macro_context: Optional[dict] = None, portfolio_adjustments: Optional[dict] = None) -> Tuple[Optional[str], dict]:
-        if df_15m.empty or len(df_15m) < 50:
+        if df_15m.empty or len(df_15m) < 60:
             return None, {}
 
         pctl = self.analysis.atr_percentile(df_15m)
@@ -1220,7 +1240,6 @@ class SignalEngine:
         macro_context = macro_context or {}
         portfolio_adjustments = portfolio_adjustments or {}
         score_adjustment = portfolio_adjustments.get("score_adjustment", 0.0)
-        defensive_mode = portfolio_adjustments.get("defensive", False)
 
         fng = macro_context.get("fear_greed")
         btc_trend_4h = macro_context.get("btc_trend_4h")
@@ -1229,7 +1248,9 @@ class SignalEngine:
         spread_pct = macro_context.get("spread_pct")
         btc_rsi = macro_context.get("btc_rsi")
         btc_macd_hist = macro_context.get("btc_macd_hist")
+        btc_reference_trade = macro_context.get("btc_reference_trade")
         btc_aligned_now = symbol != "BTC/USDT" and bool(btc_trend_4h) and btc_trend_4h == trend_4h and btc_trend_4h != "NEUTRAL"
+        is_btc = symbol == "BTC/USDT"
 
         if spread_pct is not None and spread_pct > 0.65:
             logger.info(f"{symbol}: اسپرد لحظه‌ای غیرعادی ({spread_pct:.2f}%) - سیگنال رد شد")
@@ -1238,77 +1259,40 @@ class SignalEngine:
             logger.info(f"{symbol}: نوسان غیرعادی (پرسنتایل {pctl:.0f}) - رد شد")
             return None, {}
 
+        # فیلتر رژیم بیت‌کوین: BTC نزولی → آلت‌ها خاموش
+        if not is_btc and btc_trend_4h == "BEARISH":
+            return None, {}
+
+        # روند ۴ساعته حتماً صعودی باشه
+        if trend_4h != "BULLISH":
+            return None, {}
+
         structure = self.analysis.market_structure(df_15m)
+        buy_score = self._score_buy(latest, prev, p) + 1.8
 
-        # فیلتر پیش‌گیرانه: BTC نزولی واضح → آلت‌ها خاموش
-        if symbol != "BTC/USDT" and btc_trend_4h == "BEARISH" and btc_structure == "BEARISH":
-            return None, {}
-
-        if defensive_mode:
-            if trend_4h != "BULLISH":
-                return None, {}
-            buy_score = self._score_buy(latest, prev, p)
-        elif trend_4h == "BULLISH":
-            buy_score = self._score_buy(latest, prev, p)
-        elif trend_4h == "NEUTRAL" and structure == "BULLISH":
-            buy_score = self._score_buy(latest, prev, p) * 0.75
-        else:
-            return None, {}
-
-        if trend_4h == "BULLISH":
-            buy_score += 1.2
+        # ساختار بازار ۱۵م
         if structure == "BULLISH":
-            buy_score += 1.8
+            buy_score += 2.2
+        elif structure == "NEUTRAL":
+            buy_score -= 1.0
         else:
-            buy_score -= 1.5
+            return None, {}
 
-        if self.analysis.is_mtf_aligned(df_1h, "BUY"):
-            buy_score += 1.6
-        else:
-            buy_score -= 0.8
+        # تایید تایم‌فریم ۱ساعته (اجباری)
+        if not self.analysis.is_mtf_aligned(df_1h, "BUY"):
+            return None, {}
+        buy_score += 1.8
 
-        if symbol != "BTC/USDT" and btc_trend_4h and btc_structure:
+        # هم‌راستایی با بیت‌کوین
+        if not is_btc and btc_trend_4h:
             if btc_trend_4h == "BULLISH" and btc_structure == "BULLISH":
-                buy_score += 1.0
-            elif btc_trend_4h == "BEARISH":
+                buy_score += 1.5
+            elif btc_structure == "BEARISH":
                 buy_score -= 1.5
 
-        if fng is not None:
-            if fng <= 25:
-                buy_score += 0.6
-            elif fng >= 78:
-                buy_score -= 0.8
-
-        if funding_rate is not None:
-            if funding_rate > 0.0006:
-                buy_score -= 0.7
-            elif funding_rate < -0.0004:
-                buy_score += 0.4
-
-        if btc_aligned_now and btc_rsi is not None:
-            if btc_trend_4h == "BULLISH":
-                if 48 <= btc_rsi <= 68:
-                    buy_score += 0.4
-                elif btc_rsi > 76:
-                    buy_score -= 0.5
-
-        if btc_aligned_now and btc_macd_hist is not None:
-            if btc_trend_4h == "BULLISH" and btc_macd_hist > 0:
-                buy_score += 0.3
-
-        btc_reference_trade = macro_context.get("btc_reference_trade")
-        if symbol not in ("BTC/USDT", "PAXG/USDT") and btc_aligned_now and btc_reference_trade:
-            ref_side = btc_reference_trade.get("side")
-            ref_health = btc_reference_trade.get("health", 0) or 0
-            if ref_side == "BUY":
-                if ref_health > 0.4:
-                    buy_score += 0.5
-                elif ref_health < -0.4:
-                    buy_score -= 0.6
-
-        # شرط حیاتی کیفیت: بدون پولبک فقط سیگنال‌های خیلی قوی قبول
+        # پولبک اجباریه
         has_pullback = self._is_pullback_buy(latest, prev, p)
-        if not has_pullback and buy_score < 9.5:
+        if not has_pullback:
             return None, {}
 
         threshold = max(self.config.MIN_SIGNAL_SCORE + score_adjustment, 8.2)
